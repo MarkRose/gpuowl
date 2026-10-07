@@ -391,8 +391,17 @@ void runPlanSequence(Gpu& gpu,
   }
 }
 
+// Roundoff gate for a candidate plan, the same one the PRP -use tuner applies
+// to its profiles: at least 16 squarings, maximum roundoff below 0.35.  Word
+// exactness over a few operations does not show that a plan near its
+// capacity stays exact.
+constexpr unsigned kPlanRoeSquarings = 16;
+constexpr double kPlanMaxRoe = 0.35;
+
 struct PlanComparison {
   bool exact = false;
+  bool roe_ok = false;
+  double roe = 0.0;
   double native_seconds = 0.0;
   double candidate_seconds = 0.0;
   double speedup = 0.0;
@@ -435,6 +444,17 @@ PlanComparison comparePlans(uint32_t exponent,
   const Words candidate = candidate_gpu->regRead(candidate_regs[0]);
   if (reference != candidate) return {};
 
+  // Plain squarings take the canonical carry, which records roundoff on
+  // every path; the fused LL carry records none.
+  PlanComparison out;
+  out.exact = true;
+  candidate_gpu->regWrite(candidate_regs[0], value_seed);
+  candidate_gpu->regPrpRoe(true);
+  for (unsigned i = 0; i < kPlanRoeSquarings; ++i) candidate_gpu->regSquare(candidate_regs[0]);
+  out.roe = candidate_gpu->regPrpRoe(false);
+  out.roe_ok = out.roe < kPlanMaxRoe;
+  if (!out.roe_ok) return out;
+
   const unsigned units = exponent <= 30000000u ? 64u : exponent <= 120000000u ? 32u :
                          exponent <= 180000000u ? 20u : 12u;
   auto timed = [&](Gpu& gpu, const RegPaths& paths, std::vector<Buffer<Word>>& regs,
@@ -464,8 +484,6 @@ PlanComparison comparePlans(uint32_t exponent,
       nt[rep] = timed(*native_gpu, native_paths, native_regs, native_prepared);
     }
   }
-  PlanComparison out;
-  out.exact = true;
   out.native_seconds = median3(nt);
   out.candidate_seconds = median3(ct);
   if (out.candidate_seconds > 0.0) out.speedup = out.native_seconds / out.candidate_seconds;
@@ -1156,8 +1174,12 @@ public:
     double autotune_plan_speedup = 1.0;
     double autotune_impl_speedup = 1.0;
     uint64_t autotune_elapsed_ms = 0;
+    uint64_t autotune_prior_ms = 0;
+    bool plan_search_complete = true;
+    std::vector<std::string> plan_search_tried;
     std::string autotune_key;
     std::optional<aevum_autotune::Record> cached_record;
+    std::optional<aevum_autotune::Record> deferred_record;
 
     // Issue #36 / GB202 measured FFT-shape profile.
     // Preserve the validated built-in profile ahead of the generic runtime tuner.
@@ -1300,7 +1322,7 @@ public:
       std::ostringstream flags;
       flags << "radix1k=" << (aevumRadix8For1K() ? 8 : 4)
             << ";multiq=" << multi_q_default
-            << ";safe=1;clean=1";
+            << ";safe=1;clean=1;roe-gate=1";
       if (workload_ == aevum_autotune::Workload::Prp)
         flags << ";shape-confirm=prp-square-v1";
       if (const char* ll = std::getenv("AEVUM_FUSED_LL")) flags << ";fusedll=" << ll;
@@ -1312,11 +1334,22 @@ public:
         cached_record = aevum_autotune::load(autotune_cache_path, autotune_key);
         if (cached_record) {
           const auto cached_fft = admissiblePlan(args_, exponent_, cached_record->plan);
-          if (cached_fft &&
+          const bool cached_usable = cached_fft &&
               !(workload_ == aevum_autotune::Workload::Prp &&
                 cached_fft->knownUnsafeOrdinaryPrp(exponent_)) &&
               (!factor3CapacityWorkload(workload_) ||
-               factor3CapacitySafe(args_, exponent_, *cached_fft))) {
+               factor3CapacitySafe(args_, exponent_, *cached_fft));
+          if (cached_usable && !cached_record->complete) {
+            // An earlier run ran out of time (or hit an engine error) before
+            // trying every candidate: finish the search now.
+            deferred_record = cached_record;
+            if (verbose) {
+              log("Aevum autotune: resuming deferred search workload=%s plan-so-far=%s advantage-so-far=%.4fx tried=%zu prior-tune=%" PRIu64 "ms.\n",
+                  aevum_autotune::workloadClass(workload_, register_count_).c_str(),
+                  cached_fft->spec().c_str(), cached_record->plan_speedup,
+                  cached_record->tried.size(), cached_record->tune_ms);
+            }
+          } else if (cached_usable) {
             selected_spec = cached_fft->spec();
             autotune_plan_speedup = cached_record->plan_speedup;
             autotune_impl_speedup = cached_record->implementation_speedup;
@@ -1371,6 +1404,23 @@ public:
         double best_speedup = 1.0;
         std::string best_spec = native_fft.spec();
         unsigned tested = 0;
+        std::unordered_set<std::string> tried;
+        if (deferred_record) {
+          tried.insert(deferred_record->tried.begin(), deferred_record->tried.end());
+          autotune_prior_ms = deferred_record->tune_ms;
+          const auto so_far = admissiblePlan(args_, exponent_, deferred_record->plan);
+          if (so_far && so_far->spec() != native_fft.spec()) {
+            best_spec = so_far->spec();
+            best_speedup = deferred_record->plan_speedup;
+          }
+        }
+        // Whether a candidate after `from` still needs a measurement.
+        auto untried_after = [&](size_t from) {
+          for (size_t i = from; i < candidates.size(); ++i) {
+            if (!tried.count(candidates[i]) && admissiblePlan(args_, exponent_, candidates[i])) return true;
+          }
+          return false;
+        };
         std::optional<TuneContext> tune;
 
         if (verbose) {
@@ -1385,10 +1435,16 @@ public:
           const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - tune_start).count();
           const bool strategic_seed_pending = candidate_index < strategic_candidate_count;
-          if (!strategic_seed_pending && (elapsed >= budget_ms || tested >= candidate_cap)) break;
+          if (tried.count(candidate_spec)) continue;
+          if (!strategic_seed_pending && tried.size() >= candidate_cap) break;
+          if (!strategic_seed_pending && elapsed >= budget_ms) {
+            plan_search_complete = !untried_after(candidate_index);
+            break;
+          }
           const auto candidate_fft = admissiblePlan(args_, exponent_, candidate_spec);
           if (!candidate_fft) continue;
           ++tested;
+          tried.insert(candidate_spec);
           std::string failure;
           try {
             if (!tune) tune.emplace(selected_device, shared_);
@@ -1398,9 +1454,16 @@ public:
               if (verbose) log("Aevum autotune: reject %s (WORD MISMATCH).\n", candidate_spec.c_str());
               continue;
             }
+            if (!cmp.roe_ok) {
+              if (verbose) {
+                log("Aevum autotune: reject %s (roundoff %.4f >= %.2f over %u squarings).\n",
+                    candidate_spec.c_str(), cmp.roe, kPlanMaxRoe, kPlanRoeSquarings);
+              }
+              continue;
+            }
             if (verbose) {
-              log("Aevum autotune: candidate=%s median=%.6fs native=%.6fs speedup=%.4fx.\n",
-                  candidate_spec.c_str(), cmp.candidate_seconds, cmp.native_seconds, cmp.speedup);
+              log("Aevum autotune: candidate=%s roe=%.4f median=%.6fs native=%.6fs speedup=%.4fx.\n",
+                  candidate_spec.c_str(), cmp.roe, cmp.candidate_seconds, cmp.native_seconds, cmp.speedup);
             }
             if (cmp.speedup > best_speedup) {
               best_speedup = cmp.speedup;
@@ -1418,10 +1481,13 @@ public:
             // plan measured before the error.
             log("Aevum autotune: candidate=%s failed (%s); search stopped, tuning OpenCL context discarded.\n",
                 candidate_spec.c_str(), failure.c_str());
+            plan_search_complete = !untried_after(candidate_index + 1);
             break;
           }
         }
         tune.reset();
+        plan_search_tried.assign(tried.begin(), tried.end());
+        std::sort(plan_search_tried.begin(), plan_search_tried.end());
         if (workload_ == aevum_autotune::Workload::Prp &&
             best_spec != native_fft.spec() &&
             best_speedup >= threshold) {
@@ -1480,6 +1546,10 @@ public:
         if (verbose) {
           log("Aevum autotune: selected=%s advantage=%.4fx tested=%u tune=%" PRIu64 "ms.\n",
               selected_spec.c_str(), autotune_plan_speedup, tested, autotune_elapsed_ms);
+        }
+        if (!plan_search_complete) {
+          log("Aevum autotune: search deferred after %zu of the candidate plans; the next run continues it.\n",
+              plan_search_tried.size());
         }
       }
     } else if (verbose && autotune_mode != aevum_autotune::Mode::Off) {
@@ -1768,8 +1838,10 @@ if (workload_ == aevum_autotune::Workload::Prp && !fft.isPfa()) {
       record.prepared_mul_lead = prepared_mul_lead_enabled_;
       record.plan_speedup = autotune_plan_speedup;
       record.implementation_speedup = autotune_impl_speedup;
-      record.tune_ms = autotune_elapsed_ms;
+      record.tune_ms = autotune_prior_ms + autotune_elapsed_ms;
       record.created_unix = static_cast<uint64_t>(std::time(nullptr));
+      record.complete = plan_search_complete;
+      if (!plan_search_complete) record.tried = plan_search_tried;
       try {
         aevum_autotune::storeAtomic(autotune_cache_path, record);
         if (verbose) log("Aevum autotune: persistent cache updated at %s.\n", autotune_cache_path.string().c_str());
