@@ -51,4 +51,23 @@ prp = Path("src/PrpUseTune.cpp").read_text()
 assert "44444u" in prp
 assert "55555u" not in prp
 
+
+# R86 gfx906 Type2 retained-width implementation policy.
+assert 'const bool explicit_unroll_w_use = args_.uses("UNROLL_W");' in api
+marker = "const bool gfx906_type2_prp_unroll_w1"
+start = api.index(marker)
+end = api.index("#endif", start)
+unroll = api[start:end]
+assert "!explicit_unroll_w_use" in unroll
+assert "workload_ == aevum_autotune::Workload::Prp" in unroll
+assert "pseudo_auto_spec" in unroll
+assert 'device_vendor == "4098"' in unroll
+assert 'device_name.rfind("gfx906", 0) == 0' in unroll
+assert "exponent_ >= 130000000u" in unroll
+assert "exponent_ <= 137000003u" in unroll
+assert "!fft.isPfa()" in unroll
+assert "fft.shape.fft_type == FFT3261" in unroll
+assert 'fft.spec() == "2:512:8:512:202"' in unroll
+assert 'pfa_use.emplace_back("UNROLL_W", "1")' in unroll
+
 print("Aevum production Type2 PRP AUTO source gate passed")
