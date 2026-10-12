@@ -1135,6 +1135,7 @@ public:
     // Queue policy is hardware-sensitive.  Explicit user choices always outrank
     // built-in policy; AEVUM_TYPE4_MULTI_Q remains the compatibility override.
     const bool explicit_multi_q_use = args_.uses("MULTI_Q");
+    const bool explicit_unroll_w_use = args_.uses("UNROLL_W");
 #if defined(CUDA_BACKEND)
     const bool explicit_zerohack_w_use = args_.uses("ZEROHACK_W");
 #endif
@@ -1537,6 +1538,32 @@ if (!supported_aevum_type && !apple_diagnostic_plane)
         throw std::runtime_error("AEVUM_PRP_MIDDLE1 must be 0 or 1");
       args_.flags["PRP_MIDDLE1"] = value;
     }
+#if !defined(__APPLE__) && !defined(CUDA_BACKEND)
+    // R86: Radeon VII / gfx906 Type2 PRP retained-width FFT was word-exact and
+    // consistently faster with UNROLL_W=1.  Keep this implementation choice
+    // inside the same validated AUTO Type2 window as the gfx906 queue policy.
+    // Explicit -use UNROLL_W remains higher precedence.
+    const bool gfx906_type2_prp_unroll_w1 =
+        !explicit_unroll_w_use &&
+        workload_ == aevum_autotune::Workload::Prp &&
+        pseudo_auto_spec &&
+        device_vendor == "4098" &&
+        device_name.rfind("gfx906", 0) == 0 &&
+        exponent_ >= 130000000u &&
+        exponent_ <= 137000003u &&
+        !fft.isPfa() &&
+        fft.shape.fft_type == FFT3261 &&
+        fft.spec() == "2:512:8:512:202";
+
+    if (gfx906_type2_prp_unroll_w1) {
+      pfa_use.emplace_back("UNROLL_W", "1");
+      if (verbose) {
+        log("Aevum gfx906 Type2 PRP width policy: UNROLL_W=1 "
+            "(validated 130000000..137000003).\n");
+      }
+    }
+#endif
+
 #if defined(CUDA_BACKEND)
 // Production integration of the measured RTX3080 high-range PRP policy.
 // MULTI_Q=0 remains scoped to the exact measured device/plan/range.
