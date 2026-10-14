@@ -3194,9 +3194,13 @@ void Gpu::square(Buffer<Word>& out, Buffer<Word>& in, enum LEAD_TYPE leadIn, enu
     assert(!useLongCarry);
     assert(!doMul3);
     if (fft.isPfa()) {
-      assert(!doLL);
       fftW(buf3, buf1);
-      carryA(out, buf3);
+      // LL applies its -2 in carryLL; carryA would silently drop it.
+      if (doLL) {
+        carryLL(out, buf3);
+      } else {
+        carryA(out, buf3);
+      }
       if (fft.pfa_radix == 7 && args.value("AEVUM_PFA7_SEPARATE_CARRYB", 1)) {
         // Profiling on RTX 3080 shows the lazy fused gather is substantially
         // more expensive than the already-existing canonical carryB + fftP
