@@ -1537,8 +1537,12 @@ public:
             if (!best_fft)
               throw std::runtime_error("best PRP shape became inadmissible");
 
+            // The confirmation runs the candidate's kernels too, so like the
+            // candidate search it gets an OpenCL context of its own: a fault
+            // there must not leave the production engine on a dead context.
+            TuneContext confirm_tune(selected_device, shared_);
             const auto confirm = confirmPrpPlanProduction(
-                exponent_, register_count_, shared_,
+                exponent_, register_count_, confirm_tune.shared,
                 native_fft, *best_fft, threshold);
 
             if (verbose) {

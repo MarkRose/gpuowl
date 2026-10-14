@@ -45,6 +45,11 @@ if "comparePlans(exponent_, workload_, shared_," in engine:
     raise SystemExit("plan autotune benchmarks candidates on the production OpenCL context")
 if "comparePlans(exponent_, workload_, tune->shared," not in engine:
     raise SystemExit("plan autotune does not use its tuning context")
+# The production confirmation of the winning PRP shape runs candidate kernels too.
+if re.search(r"confirmPrpPlanProduction\(\s*exponent_, register_count_, shared_,", engine):
+    raise SystemExit("the PRP shape confirmation runs on the production OpenCL context")
+if not re.search(r"confirmPrpPlanProduction\(\s*exponent_, register_count_, confirm_tune\.shared,", engine):
+    raise SystemExit("the PRP shape confirmation does not use a tuning context")
 if "comparePreparedMulLead(*gpu_" in engine:
     raise SystemExit("the prepared-multiply bridge benchmark runs on the production engine")
 
