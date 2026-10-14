@@ -1032,9 +1032,10 @@ public:
     // Rejected on both target GPUs at p=21000029. Never route to carryM.
     args_.clean = true;
     args_.useCache = true;
-    args_.cacheDir = std::filesystem::absolute(".aevum-kernel-cache");
-    args_.proofResultDir = std::filesystem::absolute(".aevum-proof");
-    args_.proofToVerifyDir = std::filesystem::absolute(".aevum-proof-tmp");
+    // Keep the host's working directory clean (it may also be read-only): the kernel cache goes next to the
+    // autotune cache, and the proof directories, which the engine never uses, are not created.
+    args_.cacheDir = aevum_autotune::kernelCacheDir();
+    args_.createProofDirs = false;
     if (tune_dir && *tune_dir) args_.masterDir = std::filesystem::absolute(tune_dir);
     args_.setDefaults();
     args_.profile = std::getenv("AEVUM_PROFILE_KERNELS") && std::strcmp(std::getenv("AEVUM_PROFILE_KERNELS"), "1") == 0;
