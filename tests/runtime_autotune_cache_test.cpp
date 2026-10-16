@@ -97,6 +97,28 @@ int main() {
   set_env("AEVUM_RADIX1K", nullptr);
   assert(!hasManualPlanOverrideEnvironment());
 
+  // The engine's kernel cache lives next to the autotune cache, never in the working directory when a cache
+  // location is known.
+  {
+    const char* home = std::getenv("HOME");
+    const std::string saved_home = home ? home : "";
+    set_env("AEVUM_AUTOTUNE_CACHE", nullptr);
+    set_env("XDG_CACHE_HOME", nullptr);
+    set_env("HOME", "/home/tester");
+    assert(kernelCacheDir() == std::filesystem::path("/home/tester/.cache/prmers/aevum/kernel-cache"));
+    assert(kernelCacheDir().parent_path() == cachePath().parent_path());
+    set_env("XDG_CACHE_HOME", "/xdg");
+    assert(kernelCacheDir() == std::filesystem::path("/xdg/prmers/aevum-kernel-cache"));
+    assert(kernelCacheDir().parent_path() == cachePath().parent_path());
+    set_env("AEVUM_AUTOTUNE_CACHE", "/pinned/tune/autotune.tsv");
+    assert(kernelCacheDir() == std::filesystem::path("/pinned/tune/aevum-kernel-cache"));
+    set_env("AEVUM_AUTOTUNE_CACHE", nullptr);
+    set_env("XDG_CACHE_HOME", nullptr);
+    set_env("HOME", nullptr);
+    assert(kernelCacheDir() == std::filesystem::absolute(".aevum-kernel-cache"));
+    set_env("HOME", home ? saved_home.c_str() : nullptr);
+  }
+
   std::filesystem::remove(tmp, ec);
   std::cout << "runtime_autotune_cache_test: OK\n";
 }

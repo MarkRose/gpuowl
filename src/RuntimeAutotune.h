@@ -50,6 +50,8 @@ std::string makeKey(const std::string& engine_version,
                     uint32_t exponent,
                     const std::string& relevant_flags);
 std::filesystem::path cachePath();
+// Directory for the engine's compiled-kernel cache, next to the autotune cache.
+std::filesystem::path kernelCacheDir();
 std::optional<Record> load(const std::filesystem::path& path, const std::string& key);
 void storeAtomic(const std::filesystem::path& path, const Record& record);
 

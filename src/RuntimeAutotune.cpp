@@ -153,6 +153,19 @@ std::filesystem::path cachePath() {
   return std::filesystem::absolute(".aevum-autotune-v1.tsv");
 }
 
+std::filesystem::path kernelCacheDir() {
+  if (const char* explicit_path = std::getenv("AEVUM_AUTOTUNE_CACHE")) {
+    if (*explicit_path) return std::filesystem::absolute(explicit_path).parent_path() / "aevum-kernel-cache";
+  }
+  if (const char* xdg = std::getenv("XDG_CACHE_HOME")) {
+    if (*xdg) return std::filesystem::path(xdg) / "prmers" / "aevum-kernel-cache";
+  }
+  if (const char* home = std::getenv("HOME")) {
+    if (*home) return std::filesystem::path(home) / ".cache" / "prmers" / "aevum" / "kernel-cache";
+  }
+  return std::filesystem::absolute(".aevum-kernel-cache");
+}
+
 std::optional<Record> load(const std::filesystem::path& path, const std::string& key) {
   std::ifstream in(path);
   if (!in) return std::nullopt;
