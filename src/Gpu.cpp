@@ -3395,10 +3395,24 @@ void Gpu::square(Buffer<Word>& out, Buffer<Word>& in, enum LEAD_TYPE leadIn, enu
     assert(!useLongCarry);
     assert(!doMul3);
     if (fft.isPfa()) {
-      assert(!doLL);
       fftW(buf3, buf1);
-      carryA(out, buf3);
-      if (fft.pfa_radix == 7 && args.value("AEVUM_PFA7_SEPARATE_CARRYB", 1)) {
+      // LL applies its -2 in carryLL; carryA would silently drop it.
+      if (doLL) {
+        carryLL(out, buf3);
+      } else {
+        carryA(out, buf3);
+      }
+#if defined(__APPLE__)
+      const bool haveCarryBridge = false;  // fftPCarryB is disabled on Apple
+#else
+      const bool haveCarryBridge = fft.shape.fft_type == FFT3161;  // fftPCarryB's own requirement
+#endif
+      if (!haveCarryBridge) {
+        // Same retained width-transform state as the bridge, from the
+        // canonical carryB + fftP sequence every PFA plan supports.
+        carryB(out);
+        fftP(buf1, out);
+      } else if (fft.pfa_radix == 7 && args.value("AEVUM_PFA7_SEPARATE_CARRYB", 1)) {
         // Profiling on RTX 3080 shows the lazy fused gather is substantially
         // more expensive than the already-existing canonical carryB + fftP
         // sequence.  Both produce the same retained width-transform state.
