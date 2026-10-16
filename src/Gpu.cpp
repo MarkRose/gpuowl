@@ -272,7 +272,7 @@ u64 pfaPowMod(u64 a, u64 e, u64 p) {
 }
 
 string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<KeyVal>& extraConf, u64 E, bool doLog,
-                 bool &tail_single_wide, bool &tail_single_kernel, u32 &in_place, u32 &pad_size, u32 &wmul) {
+                 bool &tail_single_wide, bool &tail_single_kernel, u32 &in_place, u32 &pad_size, u32 &wmul, bool &cuda_graph_squares) {
   map<string, string> config;
 
   // Highest priority is the requested "extra" conf
@@ -285,6 +285,155 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
   if (auto it = args.perFftConfig.find(fft.shape.spec()); it != args.perFftConfig.end()) {
     // log("Found %s\n", fft.shape.spec().c_str());
     config.insert(it->second.begin(), it->second.end());
+  }
+
+  // Isolate the PRPLL Type4 CRT/carry scheduling candidate from production AUTO.
+  if (const char* value = std::getenv("AEVUM_EXPERIMENT_LEAN_CARRY128")) {
+    const auto it = config.find("AEVUM_EXPERIMENT_LEAN_CARRY128");
+    if (it != config.end() && it->second != value)
+      throw std::runtime_error("conflicting AEVUM_EXPERIMENT_LEAN_CARRY128 selections");
+    config["AEVUM_EXPERIMENT_LEAN_CARRY128"] = value;
+  }
+  if (const auto it = config.find("AEVUM_EXPERIMENT_LEAN_CARRY128"); it != config.end()) {
+    if (it->second != "0" && it->second != "1")
+      throw std::runtime_error("AEVUM_EXPERIMENT_LEAN_CARRY128 must be 0 or 1");
+    if (it->second == "1") {
+      if (fft.shape.fft_type != FFT323161)
+        throw std::runtime_error("lean i128 carry requires full FP32+GF31+GF61 Type4");
+      // The native 32-bit funnel-window carry only becomes available at
+      // EXP/NWORDS >= 33. Radeon VII paired data regresses below that boundary,
+      // so keep the experiment scoped to the domain with the demonstrated win.
+      if (E / fft.shape.size() < 33)
+        throw std::runtime_error("lean i128 carry requires at least 33 bits/word");
+      if (doLog) log("Experimental Type4 lean CRT assembly and dword i128 carry.\n");
+    }
+  }
+
+  cuda_graph_squares = false;
+  if (const char* value = std::getenv("AEVUM_CUDA_GRAPH_SQUARES")) {
+    const auto it = config.find("AEVUM_CUDA_GRAPH_SQUARES");
+    if (it != config.end() && it->second != value)
+      throw std::runtime_error("conflicting AEVUM_CUDA_GRAPH_SQUARES selections");
+    config["AEVUM_CUDA_GRAPH_SQUARES"] = value;
+  }
+  if (const auto it = config.find("AEVUM_CUDA_GRAPH_SQUARES"); it != config.end()) {
+    if (it->second != "0" && it->second != "1")
+      throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES must be 0 or 1");
+    cuda_graph_squares = it->second == "1";
+  }
+  if (cuda_graph_squares) {
+#if defined(CUDA_BACKEND)
+    if (!isNvidiaGpu(id) || getNvidiaComputeCapability(id) < 750)
+      throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES requires CUDA sm_75+");
+#else
+    throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES requires the CUDA backend");
+#endif
+    if (fft.isPfa() || (fft.shape.fft_type != FFT3161 && fft.shape.fft_type != FFT3261) ||
+        fft.carry == CARRY_64 || args.carry == CARRY_64)
+      throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES requires non-PFA short-carry Type1/Type2");
+    if (args.profile || std::getenv("PRPLL_PROFILE"))
+      throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES conflicts with kernel profiling");
+    if (args.value("MULTI_Q", 0) || (config.count("MULTI_Q") && config.at("MULTI_Q") != "0"))
+      throw std::runtime_error("AEVUM_CUDA_GRAPH_SQUARES requires MULTI_Q=0");
+    if (doLog)
+      log("AEVUM_CUDA_GRAPH_SQUARES=1: retained-width squares, fresh arguments for every graph node.\n");
+  }
+  config.erase("AEVUM_CUDA_GRAPH_SQUARES"); // Host-only: identical kernel source/cache and arithmetic.
+  // PRPLL c233c11 supports odd-middle in-place transposes. Native PFA
+  // retains canonical carry words: only the transform interior is in place;
+  // fftW must still scatter into the distinct canonical buf3 allocation.
+  if (const char* value = std::getenv("AEVUM_PFA7_INPLACE")) {
+    const auto it = config.find("AEVUM_PFA7_INPLACE");
+    if (it != config.end() && it->second != value)
+      throw std::runtime_error("conflicting AEVUM_PFA7_INPLACE selections");
+    config["AEVUM_PFA7_INPLACE"] = value;
+  }
+  bool pfa7_inplace = false;
+  if (const auto it = config.find("AEVUM_PFA7_INPLACE"); it != config.end()) {
+    if (it->second != "0" && it->second != "1")
+      throw std::runtime_error("AEVUM_PFA7_INPLACE must be 0 or 1");
+    pfa7_inplace = it->second == "1";
+  }
+  if (pfa7_inplace) {
+#if defined(__APPLE__)
+    throw std::runtime_error("AEVUM_PFA7_INPLACE does not support Apple staged kernels");
+#endif
+    if (!isNvidiaGpu(id) || fft.shape.fft_type != FFT3161 ||
+        !fft.isPfa() || fft.pfa_radix != 7 || fft.shape.width != 512 ||
+        fft.shape.middle != 7 || fft.shape.height != 512 || fft.variant != 202)
+      throw std::runtime_error("AEVUM_PFA7_INPLACE requires NVIDIA pfa7:1:512:7:512:202");
+    for (const auto& setting : {KeyVal{"INPLACE", "1"}, KeyVal{"PAD", "0"},
+                               KeyVal{"TAIL_KERNELS", "1"}}) {
+      const auto it = config.find(setting.first);
+      if (it != config.end() && it->second != setting.second)
+        throw std::runtime_error("AEVUM_PFA7_INPLACE requires " + setting.first + "=" + setting.second);
+      config[setting.first] = setting.second;
+    }
+    if (doLog) log("AEVUM_PFA7_INPLACE=1: in-place transform interior, separate canonical fftW scatter.\n");
+  }
+
+  if (const char* value = std::getenv("AEVUM_PFA_GF31_COSBASE")) {
+    const auto it = config.find("AEVUM_PFA_GF31_COSBASE");
+    if (it != config.end() && it->second != value)
+      throw std::runtime_error("conflicting AEVUM_PFA_GF31_COSBASE selections");
+    config["AEVUM_PFA_GF31_COSBASE"] = value;
+  }
+  if (const auto it = config.find("AEVUM_PFA_GF31_COSBASE"); it != config.end()) {
+    if (it->second != "0" && it->second != "1")
+      throw std::runtime_error("AEVUM_PFA_GF31_COSBASE must be 0 or 1");
+    if (it->second == "1") {
+#if defined(__APPLE__)
+      throw std::runtime_error("AEVUM_PFA_GF31_COSBASE does not support Apple staged kernels");
+#endif
+      if (!fft.isPfa() || (fft.pfa_radix != 7 && fft.pfa_radix != 9) ||
+          fft.shape.fft_type != FFT3161 || fft.shape.middle != fft.pfa_radix ||
+          fft.shape.width != 512 || fft.shape.height != 512 || fft.variant != 202)
+        throw std::runtime_error("AEVUM_PFA_GF31_COSBASE requires pfa7/9:1:512:7/9:512:202");
+      if (doLog) log("AEVUM_PFA_GF31_COSBASE=1: GF31 only; GF61 policy preserved, plan=%s.\n", fft.spec().c_str());
+    }
+  }
+
+  if (const char* value = std::getenv("AEVUM_PFA7_NUSS8")) {
+    const auto it = config.find("AEVUM_PFA7_NUSS8");
+    if (it != config.end() && it->second != value)
+      throw std::runtime_error("conflicting AEVUM_PFA7_NUSS8 selections");
+    config["AEVUM_PFA7_NUSS8"] = value;
+  }
+
+  if (const auto it = config.find("AEVUM_PFA7_NUSS8");
+      it != config.end() && it->second != "0" && it->second != "1")
+    throw std::runtime_error("AEVUM_PFA7_NUSS8 must be 0 or 1");
+
+  const bool pfa7_nuss8_geometry =
+      fft.isPfa() &&
+      fft.pfa_radix == 7 &&
+      fft.shape.fft_type == FFT3161 &&
+      fft.shape.width == 512 &&
+      fft.shape.middle == 7 &&
+      fft.shape.height == 512 &&
+      fft.variant == 202;
+
+  bool pfa7_nuss8_gfx906_default = false;
+  if (!config.count("AEVUM_PFA7_NUSS8") &&
+      pfa7_nuss8_geometry &&
+      getDeviceName(id).rfind("gfx906", 0) == 0) {
+    config["AEVUM_PFA7_NUSS8"] = "1";
+    pfa7_nuss8_gfx906_default = true;
+  }
+
+  if (config.count("AEVUM_PFA7_NUSS8") &&
+      config.at("AEVUM_PFA7_NUSS8") == "1" &&
+      !pfa7_nuss8_geometry)
+    throw std::runtime_error(
+        "AEVUM_PFA7_NUSS8 requires pfa7:1:512:7:512:202");
+
+  if (doLog && config.count("AEVUM_PFA7_NUSS8") &&
+      config.at("AEVUM_PFA7_NUSS8") == "1") {
+    if (pfa7_nuss8_gfx906_default)
+      log("Validated gfx906 PFA7 NUSS8 default: plan=%s; set AEVUM_PFA7_NUSS8=0 to disable.\n",
+          fft.spec().c_str());
+    else
+      log("AEVUM_PFA7_NUSS8=1: plan=%s.\n", fft.spec().c_str());
   }
 
   if (const char* value = std::getenv("AEVUM_PFA_FUSED_INVERSE")) {
@@ -361,7 +510,7 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
  config.try_emplace("LDSPAD_H", "0");
   // Default value for -use options that must also be parsed in C++ code
   tail_single_wide = 0, tail_single_kernel = 1;
-  in_place = 0;
+  in_place = isNvidiaGpu(id) ? 1 : 0;
   wmul = 2;
   pad_size = isAmdGpu(id) ? 256 : 0;
 
@@ -384,7 +533,7 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
     if (k == "PAD") pad_size = atoi(v.c_str());
   }
 
-  if (fft.isPfa() && in_place != 0) {
+  if (fft.isPfa() && in_place != 0 && !pfa7_inplace) {
     log("Native PFA fused fftW scatter requires INPLACE=0; overriding requested INPLACE=%u.\n", in_place);
     in_place = 0;
     config["INPLACE"] = "0";
@@ -442,6 +591,13 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
     }
   }
 
+  // Register keys are host-side CUDA controls, never source specialization
+  // macros. Strip them unconditionally so even AEVUM_REGISTER_PROFILES=0
+  // (the host-side kill switch) cannot perturb unrelated source/cache identity.
+  for (auto it = config.begin(); it != config.end();) {
+    if (aevumRegisterUseKey(it->first) || it->first == "NOREG") it = config.erase(it);
+    else ++it;
+  }
   string defines = toDefine(config);
   if (doLog) { log("config: %s\n", defines.c_str()); }
 
@@ -767,7 +923,12 @@ string Gpu::numCudaRegisters(enum WHICH_KERNEL which_kernel) {
   int regs = 0;
   const char *use_override = "";
   // Allow command line to prefer the CUDA compiler's default number of registers
-  if (args.value("NOREG", 0)) return string("");
+  auto registerValue = [&](const string& key, int fallback) {
+    if (const auto it = registerProfile_.find(key); it != registerProfile_.end())
+      return it->second;
+    return args.value(key, fallback);
+  };
+  if (registerValue("NOREG", 0)) return string("");
   // Determine a kernel specific default maximum number of GPU registers (values set to -1 have not been tuned for best default value)
   switch (which_kernel) {
   case CARRYFUSED:         // Register usage depends on NW, the FFT/NTT type, and perhaps the long carry setting
@@ -895,7 +1056,7 @@ string Gpu::numCudaRegisters(enum WHICH_KERNEL which_kernel) {
     break;
   }
   // Get the optional override register count
-  int override_regs = args.value(use_override, 0);
+  int override_regs = registerValue(use_override, 0);
   // If a specified override is small, use the count as a CUDA launch_bounds rather than a maximum register count
   if (override_regs && (override_regs > 0 && override_regs <= 16)) return string("-DCUDA_MIN_BLOCKS=") + to_string(override_regs) + " ";
   // If specified, override the default maximum register count
@@ -946,10 +1107,42 @@ string Gpu::kernelDefines(enum WHICH_KERNEL_TYPE which_kernel) {
 #define ROE_SIZE 100000
 #define CARRY_SIZE 100000
 
+// GPU-local register profile: never mutate the shared Args used by workers
+// or neighboring plans. Precedence matches clDefines: extra, Args, per-FFT.
+static std::map<string, int> registerProfile(const Args& args, const FFTConfig& fft,
+                                            const vector<KeyVal>& extra) {
+  const char* enabled = std::getenv("AEVUM_REGISTER_PROFILES");
+  if (enabled && std::strcmp(enabled, "0") != 0 && std::strcmp(enabled, "1") != 0)
+    throw std::runtime_error("AEVUM_REGISTER_PROFILES must be 0 or 1");
+  // Default-on is required for validated automatic CUDA register policies.
+  // Explicit 0 restores the historical compiler defaults and is the kill switch.
+  if (enabled && std::strcmp(enabled, "0") == 0) return {};
+  std::map<string, int> result;
+  auto apply = [&](const auto& values) {
+    for (const auto& [key, value] : values) {
+      if (!aevumRegisterUseKey(key) && key != "NOREG") continue;
+      size_t end = 0;
+      int n = 0;
+      try { n = std::stoi(value, &end); }
+      catch (...) { throw std::runtime_error("invalid CUDA register profile: " + key); }
+      if (end != value.size() ||
+          (key == "NOREG" ? (n != 0 && n != 1) : (n < -1 || n > 255)))
+        throw std::runtime_error("invalid CUDA register profile: " + key);
+      result.emplace(key, n);
+    }
+  };
+  apply(extra);
+  apply(args.flags);
+  if (const auto it = args.perFftConfig.find(fft.shape.spec()); it != args.perFftConfig.end())
+    apply(it->second);
+  return result;
+}
+
 Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, bool logFftSize) :
   shared(s),
   background{shared.background},
   args{*shared.args},
+  registerProfile_{registerProfile(args, fft, extraConf)},
   E(E),
   N(fft.shape.size()),
   fft(fft),
@@ -962,7 +1155,7 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   useLongCarry{args.carry == CARRY_64},
   queue{*shared.context, args.profile},
   auxQueues{},    
-  compiler{args, shared.context, clDefines(args, shared.context->deviceId(), fft, extraConf, E, logFftSize, tail_single_wide, tail_single_kernel, in_place, pad_size, wmul)},
+  compiler{args, shared.context, clDefines(args, shared.context->deviceId(), fft, extraConf, E, logFftSize, tail_single_wide, tail_single_kernel, in_place, pad_size, wmul, cuda_graph_squares_)},
 
 #define K(name, ...) name(#name, &compiler, profile.make(#name), &queue, __VA_ARGS__)
 
@@ -1196,7 +1389,7 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
 #undef K
 
   bufTrigH{shared.bufCache->smallTrigCombo(shared.args, fft, extraConf, WIDTH, fft.shape.middle, SMALL_H, nH, tail_single_wide)},
-  bufTrigM{shared.bufCache->middleTrig(shared.args, fft, SMALL_H, BIG_H / SMALL_H, WIDTH)},
+  bufTrigM{shared.bufCache->middleTrig(shared.args, fft, extraConf, SMALL_H, BIG_H / SMALL_H, WIDTH)},
   bufTrigW{shared.bufCache->smallTrig(shared.args, fft, extraConf, WIDTH, nW, fft.shape.middle, SMALL_H, nH, tail_single_wide)},
 
   weights{genWeights(fft, E, WIDTH, BIG_H, nW, isNvidiaGpu(shared.context->deviceId()))},
@@ -2488,6 +2681,10 @@ void Gpu::fftMidOut(Buffer<double>& buf) {
 }
 
 void Gpu::fftW(Buffer<double>& out, Buffer<double>& in) {
+  // The PFA CRT scatter is a global permutation, not a tile-local write.
+  // Its destination cannot alias unread rows even with an in-place middle.
+  if (fft.isPfa() && in_place && &out == &in)
+    throw std::runtime_error("PFA in-place fftW requires a distinct canonical destination");
   // Record this call for later playback
   recorded_kernels.push_back(KFFTW);
   recorded_kernel_args.push_back(&out);
@@ -3154,6 +3351,10 @@ void Gpu::square(Buffer<Word>& out, Buffer<Word>& in, enum LEAD_TYPE leadIn, enu
   assert(leadOut != LEAD_MIDDLE);
   // LL does not do Mul3
   assert(!(doMul3 && doLL));
+#if defined(CUDA_BACKEND)
+  Queue::GraphSquareScope graph(queue, cuda_graph_squares_ && prp &&
+      leadIn == LEAD_WIDTH && leadOut == LEAD_WIDTH && !doMul3 && !doLL);
+#endif
 
   // In place FFTs use buf1.  Not in place FFTs also use buf3.
   // If leadIn is LEAD_NONE, in contains the input data, squaring starts at fftP
@@ -3212,6 +3413,9 @@ void Gpu::square(Buffer<Word>& out, Buffer<Word>& in, enum LEAD_TYPE leadIn, enu
       carryFused(buf1);
     }
   }
+#if defined(CUDA_BACKEND)
+  graph.launch();
+#endif
 }
 
 u32 Gpu::squareLoop(Buffer<Word>& out, Buffer<Word>& in, u64 from, u64 to, bool doTailMul3) {
@@ -3797,7 +4001,9 @@ PRPResult Gpu::isPrimePRP(const Task& task) {
 
     if (doStop) { log("Stopping, please wait..\n"); }
 
-    square(bufData, bufData, leadIn, leadOut, false);
+    // Production PRP retained-width iterations are eligible for the optional
+    // CUDA graph path; other square callers keep the default prp=false.
+    square(bufData, bufData, leadIn, leadOut, false, false, true);
     leadIn = leadOut;
 
     if (k == persistK) {

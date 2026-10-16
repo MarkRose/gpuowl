@@ -17,6 +17,7 @@ Licensed under GNU GPL version 3. See LICENSE and UPSTREAM.md.
 #include "TuneEntry.h"
 #include "RuntimeAutotune.h"
 #include "PrpUseTune.h"
+#include "UseOptions.h"
 #include "common.h"
 #include "gpuid.h"
 #include "version.h"
@@ -651,35 +652,86 @@ std::vector<KeyVal> selectPrpUse(uint32_t exponent, size_t regs, GpuCommon share
   auto report=[&](const char* source,const std::string& profile,double gain=1) {
     if(verbose)log("AEVUM_PRP_USE source=%s shape=%s profile=%s gain=%.5f\n",source,fft.spec().c_str(),profile.empty()?"defaults":profile.c_str(),gain);
   };
+  std::vector<KeyVal> register_overlay;
   if(const char* manual=std::getenv("AEVUM_PRP_USE")) {
-    auto use=parse(manual); report("manual",normalize(use)); return use;
+    auto use=parse(manual);
+    const bool register_only = !use.empty() && std::all_of(
+        use.begin(), use.end(),
+        [](const KeyVal& kv) { return aevumRegisterUseKey(kv.first) || kv.first == "NOREG"; });
+    if (!register_only) {
+      report("manual",normalize(use));
+      return use;
+    }
+    register_overlay = std::move(use);
   }
+  auto finish = [&](const char* source, std::vector<KeyVal> use, double gain=1.0) {
+    for (const auto& kv : register_overlay) {
+      use.erase(std::remove_if(
+          use.begin(), use.end(),
+          [&](const KeyVal& x) { return x.first == kv.first; }),
+          use.end());
+      use.push_back(kv);
+    }
+    report(source,normalize(use),gain);
+    return use;
+  };
   // Issue #36: native tune entries may carry both a validated FFT shape and
   // validated -use policy. Preserve those flags exactly as a higher-priority
   // source; automatic tuning never overwrites a matching tune entry.
   for(const auto& entry:TuneEntry::readTuneFile(*shared.args)) {
     if(entry.fft.spec()==fft.spec() && !entry.use.empty() && entry.fft.maxExp()>=exponent) {
-      report("tune-entry",normalize(entry.use));return entry.use;
+      return finish("tune-entry",entry.use);
     }
   }
   if (fft.shape.fft_type == FFT3261) {
     auto use = parse("INPLACE=1,TAIL_TRIGS=0");
-    report("type2-prp-auto", normalize(use));
-    return use;
+    const cl_device_id type2_device = shared.context->deviceId();
+    const std::string type2_device_vendor = openclVendorId(type2_device);
+    const std::string type2_device_name = openclDeviceName(type2_device);
+    const bool gfx906_type2_prp =
+        type2_device_vendor == "4098" &&
+        type2_device_name.rfind("gfx906", 0) == 0 &&
+        exponent >= 130000000u &&
+        exponent <= 137000003u &&
+        !fft.isPfa() &&
+        fft.spec() == "2:512:8:512:202";
+
+    if (gfx906_type2_prp) {
+      if (!shared.args->uses("AEVUM_GF61_CMUL_ALT"))
+        use.emplace_back("AEVUM_GF61_CMUL_ALT", "0");
+      if (!shared.args->uses("LOADS"))
+        use.emplace_back("LOADS", "1");
+      if (!shared.args->uses("FAST_BARRIER"))
+        use.emplace_back("FAST_BARRIER", "1");
+      if (!shared.args->uses("AEVUM_ROE_SUBGROUP_REDUCE"))
+        use.emplace_back("AEVUM_ROE_SUBGROUP_REDUCE", "1");
+      if (!shared.args->uses("AEVUM_GF61_BETTER_ONEPAIRSQ"))
+        use.emplace_back("AEVUM_GF61_BETTER_ONEPAIRSQ", "1");
+      if (!shared.args->uses("WMUL") &&
+          std::getenv("AEVUM_CARRY_WMUL") == nullptr)
+        use.emplace_back("WMUL", "4");
+      if (!shared.args->uses("STORES"))
+        use.emplace_back("STORES", "1");
+      if (!shared.args->uses("AEVUM_GF61_MIDDLE_BASE_TABLE"))
+        use.emplace_back("AEVUM_GF61_MIDDLE_BASE_TABLE", "2");
+    }
+
+    return finish("type2-prp-auto", std::move(use));
   }
   const auto control=mode();
   bool manual_kernel=false;
   for(const char* name:{"AEVUM_PFA_USE","AEVUM_RADIX1K","AEVUM_TYPE4_MULTI_Q","AEVUM_CARRY_WMUL",
       "AEVUM_GF61_LIMB32","AEVUM_PRP_MIDDLE1","AEVUM_REG_LEAD_CACHE"})
     if(const char* value=std::getenv(name))if(*value)manual_kernel=true;
-  if(control==aevum_autotune::Mode::Off || manual_kernel || fft.isPfa()) {report("defaults/bypass","");return {};}
+  if(control==aevum_autotune::Mode::Off || manual_kernel || fft.isPfa())
+    return finish("defaults/bypass",{});
 
   std::string flags=normalize(existing);
   for(const auto& [k,v]:shared.args->flags)flags+=';'+k+'='+v;
   const auto cache_key=key(identity,fft.spec(),exponent,flags);
   if(control==aevum_autotune::Mode::Auto)if(auto r=load(cache_key)) {
     auto use=r->plan=="defaults"?std::vector<KeyVal>{}:parse(r->plan);
-    report("cache-hit",normalize(use),r->implementation_speedup);return use;
+    return finish("cache-hit",std::move(use),r->implementation_speedup);
   }
 
   const bool nvidia_asm=isNvidiaGpu(shared.context->deviceId()) && !shared.args->uses("NO_ASM");
@@ -876,11 +928,16 @@ std::vector<KeyVal> selectPrpUse(uint32_t exponent, size_t regs, GpuCommon share
       state_name,progress.screened,progress.planned,full_planned,progress.finalized,progress.finalists,uint64_t(elapsed()),state.next_screen,state.next_finalist,winning_gain);
   try{persistDecision(cache_key,decision,winner,winning_gain,elapsed());}
   catch(...){if(verbose)log("AEVUM_PRP_USE cache-write-failed; using completed decision\n");}
-  report(decision==Decision::Deferred?"deferred":decision==Decision::Positive?"measured":"measured-defaults",winner,winning_gain);
+  const char* decision_source =
+      decision==Decision::Deferred ? "deferred" :
+      decision==Decision::Positive ? "measured" : "measured-defaults";
   // A deferred winner is not yet final: safe defaults remain active until all
   // shortlisted finalists have been compared and a completed-positive record
   // is atomically committed.
-  return decision==Decision::Positive?parse(winner):std::vector<KeyVal>{};
+  return finish(
+      decision_source,
+      decision==Decision::Positive ? parse(winner) : std::vector<KeyVal>{},
+      winning_gain);
 }
 
 #if defined(CUDA_BACKEND)
@@ -1252,6 +1309,7 @@ public:
             << ";safe=1;clean=1";
       if (workload_ == aevum_autotune::Workload::Prp)
         flags << ";shape-confirm=prp-square-v1";
+      if (const char* reg = std::getenv("AEVUM_REGISTER_PROFILES")) flags << ";register-profiles=" << reg;
       if (const char* ll = std::getenv("AEVUM_FUSED_LL")) flags << ";fusedll=" << ll;
       if (const char* bridge = std::getenv("AEVUM_PREPARED_MUL_LEAD")) flags << ";prep-lead=" << bridge;
       autotune_key = aevum_autotune::makeKey(VERSION, vendor, device_name, driver, runtime,
@@ -1565,6 +1623,72 @@ if (!supported_aevum_type && !apple_diagnostic_plane)
 #endif
 
 #if defined(CUDA_BACKEND)
+// Validated RTX 3080 native-CUDA Type1 carryFused occupancy policy.
+// Register profiles are default-on in this layer; AEVUM_REGISTER_PROFILES=0
+// is the explicit kill switch. Explicit command-line/per-FFT REGCF3161 or
+// NOREG remain higher precedence. A register-only AEVUM_PRP_USE overlay is
+// merged later and can also replace this automatic value.
+const char* register_profiles_env = std::getenv("AEVUM_REGISTER_PROFILES");
+const bool register_profiles_enabled =
+    !register_profiles_env || std::strcmp(register_profiles_env, "0") != 0;
+bool explicit_cuda_carry_registers =
+    args_.uses("REGCF3161") || args_.uses("NOREG");
+bool explicit_cuda_midout61_registers =
+    args_.uses("REGMO61") || args_.uses("NOREG");
+if (const auto it = args_.perFftConfig.find(fft.shape.spec());
+    it != args_.perFftConfig.end()) {
+  for (const auto& [key, value] : it->second) {
+    (void)value;
+    if (key == "REGCF3161" || key == "NOREG")
+      explicit_cuda_carry_registers = true;
+    if (key == "REGMO61" || key == "NOREG")
+      explicit_cuda_midout61_registers = true;
+  }
+}
+const bool rtx3080_type1_regcf3161_2 =
+    register_profiles_enabled &&
+    !explicit_cuda_carry_registers &&
+    workload_ == aevum_autotune::Workload::Prp &&
+    !fft.isPfa() &&
+    device_name == "NVIDIA GeForce RTX 3080" &&
+    getNvidiaComputeCapability(selected_device) == 806u &&
+    exponent_ >= 135000013u &&
+    exponent_ <= 158000003u &&
+    fft.spec() == "1:512:8:512:202";
+
+if (rtx3080_type1_regcf3161_2) {
+  pfa_use.emplace_back("REGCF3161", "2");
+  if (verbose) {
+    log("AEVUM_CUDA_REG_PROFILE source=rtx3080-type1-auto shape=%s "
+        "profile=REGCF3161=2 range=135000013..158000003\n",
+        fft.spec().c_str());
+  }
+}
+
+// On the same validated RTX 3080 Type1 PRP band, allowing the compiler to
+// choose fftMiddleOutGF61 register usage instead of forcing the historical
+// 64-register cap was word-exact and improved throughput. Keep this minimal
+// and GF61-only; REGMO31=-1 had no material benefit.
+const bool rtx3080_type1_regmo61_default =
+    register_profiles_enabled &&
+    !explicit_cuda_midout61_registers &&
+    workload_ == aevum_autotune::Workload::Prp &&
+    !fft.isPfa() &&
+    device_name == "NVIDIA GeForce RTX 3080" &&
+    getNvidiaComputeCapability(selected_device) == 806u &&
+    exponent_ >= 135000013u &&
+    exponent_ <= 158000003u &&
+    fft.spec() == "1:512:8:512:202";
+
+if (rtx3080_type1_regmo61_default) {
+  pfa_use.emplace_back("REGMO61", "-1");
+  if (verbose) {
+    log("AEVUM_CUDA_REG_PROFILE source=rtx3080-type1-auto shape=%s "
+        "profile=REGMO61=-1 range=135000013..158000003\n",
+        fft.spec().c_str());
+  }
+}
+
 // Production integration of the measured RTX3080 high-range PRP policy.
 // MULTI_Q=0 remains scoped to the exact measured device/plan/range.
 // ZEROHACK_W is selected independently below by a cached exact mini-benchmark.
@@ -1728,6 +1852,11 @@ if (workload_ == aevum_autotune::Workload::Prp && !fft.isPfa()) {
     }
 
     buffers_ = gpu_->makeBufVector(static_cast<u32>(register_count_));
+    if (const char* alias_value = std::getenv("AEVUM_PREPARED_ALIAS_REUSE")) {
+      if (std::strcmp(alias_value, "0") != 0 && std::strcmp(alias_value, "1") != 0)
+        throw std::runtime_error("AEVUM_PREPARED_ALIAS_REUSE must be 0 or 1");
+      prepared_alias_reuse_enabled_ = std::strcmp(alias_value, "1") == 0;
+    }
     size_t prepared_count = std::min<size_t>(register_count_, 2);
     if (const char* value = std::getenv("AEVUM_PREPARED_CACHE")) {
       char* end = nullptr;
@@ -1836,7 +1965,9 @@ if (workload_ == aevum_autotune::Workload::Prp && !fft.isPfa()) {
     check_reg(src);
     flush_pending_square();
     if (dst != src) {
+      const size_t source_slot = prepared_alias_reuse_enabled_ ? find_prepared(src, true) : no_prepared;
       invalidate_if(dst);
+      if (source_slot != no_prepared) prepared_slots_[source_slot].regs.push_back(dst);
       if (!timing_enabled_) {
         gpu_->regCopy(reg(dst), reg(src));
       } else {
@@ -1853,13 +1984,21 @@ if (workload_ == aevum_autotune::Workload::Prp && !fft.isPfa()) {
     check_reg(dst);
     check_reg(src);
     flush_pending_square();
+    const size_t source_slot =
+        prepared_alias_reuse_enabled_ ? find_prepared(src, true) : no_prepared;
     if (dst != src) {
       invalidate_if(dst);
       gpu_->regCopy(reg(dst), reg(src));
     }
+    if (source_slot != no_prepared) {
+      if (dst != src) prepared_slots_[source_slot].regs.push_back(dst);
+      return;
+    }
     if (prepared_buffers_.empty()) return;
     const size_t slot = acquire_prepared(dst);
     gpu_->regPrepare(prepared_buffers_[slot], reg(dst));
+    if (prepared_alias_reuse_enabled_ && dst != src)
+      prepared_slots_[slot].regs.push_back(src);
   }
 
   void square_mul(size_t index, uint32_t factor) {
@@ -1996,7 +2135,7 @@ private:
   enum class PendingKind { None, Square, PreparedMul };
 
   struct PreparedSlot {
-    size_t reg = no_prepared;
+    std::vector<size_t> regs;
     uint64_t stamp = 0;
   };
 
@@ -2038,7 +2177,8 @@ private:
 
   size_t find_prepared(size_t index, bool touch) {
     for (size_t i = 0; i < prepared_slots_.size(); ++i) {
-      if (prepared_slots_[i].reg == index) {
+      const auto& aliases = prepared_slots_[i].regs;
+      if (std::find(aliases.begin(), aliases.end(), index) != aliases.end()) {
         if (touch) prepared_slots_[i].stamp = ++prepared_clock_;
         return i;
       }
@@ -2051,17 +2191,18 @@ private:
     if (existing != no_prepared) return existing;
     size_t slot = no_prepared;
     for (size_t i = 0; i < prepared_slots_.size(); ++i) {
-      if (prepared_slots_[i].reg == no_prepared) { slot = i; break; }
+      if (prepared_slots_[i].regs.empty()) { slot = i; break; }
       if (slot == no_prepared || prepared_slots_[i].stamp < prepared_slots_[slot].stamp) slot = i;
     }
-    prepared_slots_[slot].reg = index;
+    prepared_slots_[slot].regs.assign(1, index);
     prepared_slots_[slot].stamp = ++prepared_clock_;
     return slot;
   }
 
   void invalidate_if(size_t index) {
     for (auto& slot : prepared_slots_) {
-      if (slot.reg == index) slot.reg = no_prepared;
+      auto& aliases = slot.regs;
+      aliases.erase(std::remove(aliases.begin(), aliases.end(), index), aliases.end());
     }
   }
 
@@ -2132,6 +2273,7 @@ private:
   bool pending_ll_ = false;
   bool lead_cache_enabled_ = false;
   bool prepared_mul_lead_enabled_ = false;
+  bool prepared_alias_reuse_enabled_ = false;
   PendingKind pending_kind_ = PendingKind::None;
   size_t pending_reg_ = no_prepared;
   size_t pending_prepared_slot_ = no_prepared;

@@ -16,6 +16,7 @@
 #include "FFTConfig.h"
 
 #include <vector>
+#include <map>
 #include <memory>
 #include <filesystem>
 #include <cmath>
@@ -90,6 +91,7 @@ public:
   const Args& args;
 
 private:
+  std::map<std::string, int> registerProfile_;
   std::unique_ptr<Saver<PRPState>> saver;
 
   u64 E;
@@ -116,6 +118,8 @@ private:
   u32 in_place{0};                       // 0 = out-of-place
   u32 wmul{2};                           // Carry-fused width multiplier
   u32 pad_size{0};                       // Padding in bytes
+
+  bool cuda_graph_squares_{false};       // Resolved before compiler creation
 
   Queue queue;
   vector<Queue> auxQueues;
