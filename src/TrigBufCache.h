@@ -41,6 +41,7 @@ inline u32 checkTailTrigs(const std::string& key, long v) {
   return u32(v);
 }
 
+// Parse the text of a TAIL_TRIGS* -use value strictly: the whole text must be an integer in 0..MAX_TAIL_TRIGS.
 inline u32 parseTailTrigs(const std::string& key, const std::string& text) {
   char* end = nullptr;
   errno = 0;
@@ -51,6 +52,12 @@ inline u32 parseTailTrigs(const std::string& key, const std::string& text) {
   return checkTailTrigs(key, v);
 }
 
+// Key of the small/middle trig caches.  Each field is one "is this number type in use" flag and that type's
+// TAIL_TRIGS setting, and they need separate bits: added together, a type in use with TAIL_TRIGS=n is
+// indistinguishable from that type unused with TAIL_TRIGS=n+1, and a TAIL_TRIGS of 3 or more carries into the
+// neighbouring field.  Two Gpus sharing a cache could then be handed each other's tables (silently wrong twiddles).
+// A type that is not in use has no table, so its setting does not take part in the key.  A value outside the
+// supported range is an error, never truncated: masking it into the field would make e.g. 0 and 8 share a key.
 inline u32 trigKeyField(bool inUse, u32 tailTrigs) {
   if (!inUse) return 0;
   if (tailTrigs > u32(MAX_TAIL_TRIGS)) throw std::out_of_range("TAIL_TRIGS value " + std::to_string(tailTrigs) + " is outside 0.." + std::to_string(MAX_TAIL_TRIGS));
