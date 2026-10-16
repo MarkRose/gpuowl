@@ -492,3 +492,12 @@ $(FFT_LONG_CARRY_CUTOFF_TEST): tests/fft_long_carry_cutoff_test.cpp src/Gpu.cpp 
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra $(TEST_SECTION_FLAGS) -Isrc \
 		tests/fft_long_carry_cutoff_test.cpp src/PrpUseTune.cpp src/RuntimeAutotune.cpp src/FFTConfig.cpp src/Args.cpp src/TuneEntry.cpp src/common.cpp src/fs.cpp src/File.cpp src/timeutil.cpp \
 		$(TEST_GC_LINK) -o $@
+ENGINE_EQUAL_GPU_TEST := build-tests/aevum-engine-equal-canonical-gpu-test
+
+.PHONY: test-engine-equal-gpu
+test-engine-equal-gpu: engine-lib $(ENGINE_EQUAL_GPU_TEST)
+	$(ENGINE_EQUAL_GPU_TEST) $(ENGINE_LIB) $(if $(AEVUM_TEST_DEVICE),$(AEVUM_TEST_DEVICE),0) . "$(AEVUM_TEST_FFT)"
+
+$(ENGINE_EQUAL_GPU_TEST): tests/engine_equal_canonical_gpu_test.cpp src/EngineApi.h
+	@mkdir -p $(dir $@)
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) $< $(DL_LIBS) -o $@
