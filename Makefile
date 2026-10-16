@@ -236,6 +236,7 @@ test-host: $(MONOLITHIC_SOURCE_TEST) $(HOST_TEST) $(STATE_TEST) $(OPENCL_STANDAR
 	python3 tests/apple_canonical_set_u32_test.py
 	bash tests/source_audit.sh
 	python3 tests/gpu_init_order_test.py
+	python3 tests/tail_kernels_range_source_test.py
 	python3 tests/engine_autotune_isolation_test.py
 	python3 tests/engine_lead_cache_test.py
 	python3 tests/native_tune_compat_source_test.py
@@ -557,3 +558,13 @@ test-trig-cache-key: $(TRIG_CACHE_KEY_TEST)
 $(TRIG_CACHE_KEY_TEST): tests/trig_cache_key_test.cpp src/TrigBufCache.h
 	@mkdir -p build-tests
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/trig_cache_key_test.cpp -o $@
+# Strict integer parsing for -use values (cherubrock-seb/PrMers#130)
+STRICT_INT_TEST := build-tests/aevum-strict-int-test
+.PHONY: test-strict-int
+test-host: test-strict-int
+test-strict-int: $(STRICT_INT_TEST)
+	$(STRICT_INT_TEST)
+
+$(STRICT_INT_TEST): tests/strict_int_test.cpp src/StrictInt.h
+	@mkdir -p build-tests
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/strict_int_test.cpp -o $@
