@@ -997,6 +997,7 @@ vector<double2> genMiddleTrig(FFTConfig fft, u32 smallH, u32 middle, u32 width, 
 /*        Code to manage a cache of trigBuffers         */
 /********************************************************/
 
+
 TrigBufCache::~TrigBufCache() = default;
 
 TrigPtr TrigBufCache::smallTrig(Args *args, FFTConfig fft, const vector<KeyVal>& extraConf, u32 width, u32 nW, u32 middle, u32 height, u32 nH, bool tail_single_wide) {
