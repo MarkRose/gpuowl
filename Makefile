@@ -536,3 +536,14 @@ test-data-layout: $(DATA_LAYOUT_TEST)
 $(DATA_LAYOUT_TEST): tests/data_layout_test.cpp src/DataLayout.h
 	@mkdir -p build-tests
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc $< -o $@
+# Explicit 32-bit carry gate (cherubrock-seb/PrMers#104)
+FFT_CARRY32_GATE_TEST := build-tests/aevum-fft-carry32-gate-test
+.PHONY: test-fft-carry32-gate
+test-host: test-fft-carry32-gate
+test-fft-carry32-gate: $(FFT_CARRY32_GATE_TEST)
+	$(FFT_CARRY32_GATE_TEST)
+$(FFT_CARRY32_GATE_TEST): tests/fft_carry32_gate_test.cpp src/FFTConfig.cpp src/FFTConfig.h src/Args.cpp src/TuneEntry.cpp src/common.cpp src/fs.cpp src/File.cpp src/timeutil.cpp
+	@mkdir -p build-tests
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra $(TEST_SECTION_FLAGS) -Isrc \
+		tests/fft_carry32_gate_test.cpp src/PrpUseTune.cpp src/RuntimeAutotune.cpp src/FFTConfig.cpp src/Args.cpp src/TuneEntry.cpp src/common.cpp src/fs.cpp src/File.cpp src/timeutil.cpp \
+		$(TEST_GC_LINK) -o $@
