@@ -526,3 +526,13 @@ test-cuda-error-map: $(CUDA_ERROR_MAP_TEST)
 $(CUDA_ERROR_MAP_TEST): tests/cuda_error_map_test.cpp src/cuda/CudaErrorMap.h src/GpuLost.h
 	@mkdir -p build-tests
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/cuda_error_map_test.cpp -o $@
+DATA_LAYOUT_TEST := build-tests/aevum-data-layout-test
+
+.PHONY: test-data-layout
+test-host: test-data-layout
+test-data-layout: $(DATA_LAYOUT_TEST)
+	$(DATA_LAYOUT_TEST)
+
+$(DATA_LAYOUT_TEST): tests/data_layout_test.cpp src/DataLayout.h
+	@mkdir -p build-tests
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc $< -o $@
