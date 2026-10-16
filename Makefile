@@ -454,3 +454,14 @@ test-gf61-middle-base-table: $(GF61_MIDDLE_BASE_TABLE_TEST)
 $(GF61_MIDDLE_BASE_TABLE_TEST): tests/gf61_middle_base_table_kernel_test.cpp $(GF61_MIDDLE_BASE_TABLE_SRCS) src/TrigBufCache.h $(wildcard src/cl/*.cl)
 	@mkdir -p build-tests
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra $(TEST_SECTION_FLAGS) -Isrc tests/gf61_middle_base_table_kernel_test.cpp $(GF61_MIDDLE_BASE_TABLE_SRCS) $(TEST_GC_LINK) $(OPENCL_LIBS) -o $@
+
+# CUDA clEnqueueFillBuffer planning for all OpenCL pattern sizes.
+CUDA_FILL_TEST := build-tests/aevum-cuda-fill-test
+.PHONY: test-cuda-fill
+test-host: test-cuda-fill
+test-cuda-fill: $(CUDA_FILL_TEST)
+	$(CUDA_FILL_TEST)
+
+$(CUDA_FILL_TEST): tests/cuda_fill_test.cpp src/cuda/CudaFill.h
+	@mkdir -p build-tests
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/cuda_fill_test.cpp -o $@
