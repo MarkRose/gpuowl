@@ -120,7 +120,7 @@ cl_context clCreateContext(const intptr_t*, unsigned nDevices, const cl_device_i
 #endif
   if (r != CUDA_SUCCESS) {
     delete ctx;
-    if (err) *err = CL_OUT_OF_RESOURCES;
+    if (err) *err = clStatusFromCu(r);
     return nullptr;
   }
   g_cudaContext = ctx->ctx;  // Track for ensureContextCurrent()
@@ -638,7 +638,7 @@ cl_mem clCreateBuffer(cl_context ctx, cl_mem_flags flags, size_t size, void* hos
   CUresult r = cuMemAlloc(&buf->ptr, size);
   if (r != CUDA_SUCCESS) {
     delete buf;
-    if (err) *err = CL_MEM_OBJECT_ALLOCATION_FAILURE;
+    if (err) *err = clStatusFromCu(r);
     return nullptr;
   }
   // Handle CL_MEM_COPY_HOST_PTR
@@ -682,7 +682,7 @@ cl_command_queue clCreateCommandQueueWithProperties(cl_context ctx, cl_device_id
   CUresult r = cuStreamCreate(&q->stream, CU_STREAM_NON_BLOCKING);
   if (r != CUDA_SUCCESS) {
     delete q;
-    if (err) *err = CL_OUT_OF_RESOURCES;
+    if (err) *err = clStatusFromCu(r);
     return nullptr;
   }
   if (err) *err = CL_SUCCESS;
@@ -729,7 +729,7 @@ int clEnqueueNDRangeKernel(cl_command_queue q, cl_kernel k, unsigned workDim,
     CUresult r = cuLaunchKernel(k->func, numBlocks, 1, 1, ls, 1, 1, 0, q->stream, argPtrs, nullptr);
     cuEventRecord(ev->end, q->stream);
     *event = ev;
-    return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+    return clStatusFromCu(r);
   }
   if (doProfile) {
     static std::map<std::string, double> kTime;
@@ -770,7 +770,7 @@ int clEnqueueNDRangeKernel(cl_command_queue q, cl_kernel k, unsigned workDim,
       fprintf(stderr, "  TOTAL: %.1f ms\n===\n\n", totalMs);
     }
     if (event) *event = nullptr;
-    return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+    return clStatusFromCu(r);
   }
 
   CUresult r = cuLaunchKernel(k->func, numBlocks, 1, 1, ls, 1, 1, 0, q->stream, argPtrs, nullptr);
@@ -781,7 +781,7 @@ int clEnqueueNDRangeKernel(cl_command_queue q, cl_kernel k, unsigned workDim,
   }
 
   if (event) *event = nullptr;
-  return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+  return clStatusFromCu(r);
 }
 
 int clEnqueueReadBuffer(cl_command_queue q, cl_mem buf, cl_bool blocking,
@@ -794,7 +794,7 @@ int clEnqueueReadBuffer(cl_command_queue q, cl_mem buf, cl_bool blocking,
     r = cuStreamSynchronize(q->stream);
   }
   if (event) *event = nullptr;
-  return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+  return clStatusFromCu(r);
 }
 
 int clEnqueueWriteBuffer(cl_command_queue q, cl_mem buf, cl_bool blocking,
@@ -806,7 +806,7 @@ int clEnqueueWriteBuffer(cl_command_queue q, cl_mem buf, cl_bool blocking,
     r = cuStreamSynchronize(q->stream);
   }
   if (event) *event = nullptr;
-  return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+  return clStatusFromCu(r);
 }
 
 int clEnqueueCopyBuffer(cl_command_queue q, cl_mem src, cl_mem dst,
@@ -814,7 +814,7 @@ int clEnqueueCopyBuffer(cl_command_queue q, cl_mem src, cl_mem dst,
                          unsigned nWaits, const cl_event* waits, cl_event* event) {
   CUresult r = cuMemcpyDtoDAsync(dst->ptr + dstOffset, src->ptr + srcOffset, size, q->stream);
   if (event) *event = nullptr;
-  return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+  return clStatusFromCu(r);
 }
 
 int clEnqueueFillBuffer(cl_command_queue q, cl_mem buf, const void* pattern,
@@ -852,7 +852,7 @@ int clEnqueueFillBuffer(cl_command_queue q, cl_mem buf, const void* pattern,
     }
     break;
   }
-  return r == CUDA_SUCCESS ? CL_SUCCESS : CL_OUT_OF_RESOURCES;
+  return clStatusFromCu(r);
 }
 
 int clEnqueueMarkerWithWaitList(cl_command_queue q, unsigned nWaits, const cl_event* waits, cl_event* event) {
