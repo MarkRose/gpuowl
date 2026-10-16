@@ -23,7 +23,7 @@ assert "fft.shape.middle == 8u" in api
 assert "fft.shape.height == 512u" in api
 assert "fft.variant == 202u" in api
 
-assert 'report("type2-prp-auto"' in api
+assert 'return finish("type2-prp-auto"' in api
 assert 'parse("INPLACE=1,TAIL_TRIGS=0")' in api
 
 assert "kPrpType2MinExponent = 130000000u" in fft
