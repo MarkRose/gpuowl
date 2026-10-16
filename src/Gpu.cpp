@@ -273,7 +273,8 @@ u64 pfaPowMod(u64 a, u64 e, u64 p) {
 }
 
 string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<KeyVal>& extraConf, u64 E, bool doLog,
-                 bool &tail_single_wide, bool &tail_single_kernel, u32 &in_place, u32 &pad_size, u32 &wmul, bool &cuda_graph_squares) {
+                 bool &tail_single_wide, bool &tail_single_kernel, u32 &in_place, u32 &pad_size, u32 &wmul,
+                 bool &cuda_graph_squares, u32 &in_wg, u32 &in_sizex, u32 &out_wg, u32 &out_sizex) {
   map<string, string> config;
 
   // Highest priority is the requested "extra" conf
@@ -514,6 +515,8 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
   in_place = isNvidiaGpu(id) ? 1 : 0;
   wmul = 2;
   pad_size = isAmdGpu(id) ? 256 : 0;
+  in_wg = out_wg = 128;
+  in_sizex = out_sizex = 16;
 
   // Validate -use options
   for (const auto& [k, v] : config) {
@@ -531,8 +534,24 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, const vector<
     }
     if (k == "INPLACE") in_place = atoi(v.c_str());
     if (k == "WMUL") wmul = atoi(v.c_str());
-    if (k == "PAD") pad_size = atoi(v.c_str());
+    if (k == "PAD") {
+      const int pad = atoi(v.c_str());
+      if (pad < 0 || pad > AEVUM_MAX_PAD) {
+        log("Invalid PAD=%d, must be 0..%d\n", pad, AEVUM_MAX_PAD);
+        throw std::runtime_error("invalid PAD");
+      }
+      pad_size = pad;
+    }
+    if (k == "IN_WG") in_wg = atoi(v.c_str());
+    if (k == "IN_SIZEX") in_sizex = atoi(v.c_str());
+    if (k == "OUT_WG") out_wg = atoi(v.c_str());
+    if (k == "OUT_SIZEX") out_sizex = atoi(v.c_str());
   }
+
+  if (!in_wg) in_wg = 128;
+  if (!out_wg) out_wg = 128;
+  if (!in_sizex) in_sizex = 16;
+  if (!out_sizex) out_sizex = 16;
 
   if (fft.isPfa() && in_place != 0 && !pfa7_inplace) {
     log("Native PFA fused fftW scatter requires INPLACE=0; overriding requested INPLACE=%u.\n", in_place);
@@ -752,9 +771,11 @@ defines += toDefine("TRIG_COS", cosCoefs + '}');
 
   // When using multiple NTT primes or hybrid FFT/NTT, each FFT/NTT prime's data buffer and trig values are combined into one buffer.
   // The openCL code needs to know the offset to the data and trig values.  Distances are in "number of double2 values".
+  const u32 nDataElements = u32(middleDataElements(fft.shape.width, fft.shape.middle, fft.shape.height,
+                                                   in_place, int(pad_size), in_wg, in_sizex, out_wg, out_sizex));
   if (fft.FFT_FP64 && fft.NTT_GF31) {
     // GF31 data is located after the FP64 data.  Compute size of the FP64 data and trigs.
-    defines += toDefine("DISTGF31",      FP64_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF31",      FP64_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF31", SMALLTRIG_FP64_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF31", MIDDLETRIG_FP64_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF31", SMALLTRIGCOMBO_FP64_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
@@ -762,25 +783,25 @@ defines += toDefine("TRIG_COS", cosCoefs + '}');
   else if (fft.FFT_FP32 && fft.NTT_GF31 && fft.NTT_GF61) {
     // GF31 and GF61 data is located after the FP32 data.  Compute size of the FP32 data and trigs.
     u32 sz1, sz2, sz3, sz4;
-    defines += toDefine("DISTGF31",      sz1 = FP32_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF31",      sz1 = FP32_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF31", sz2 = SMALLTRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF31", sz3 = MIDDLETRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF31", sz4 = SMALLTRIGCOMBO_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
-    defines += toDefine("DISTGF61",      sz1 + GF31_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF61",      sz1 + GF31_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF61", sz2 + SMALLTRIG_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF61", sz3 + MIDDLETRIG_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF61", sz4 + SMALLTRIGCOMBO_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
   }
   else if (fft.FFT_FP32 && fft.NTT_GF31) {
     // GF31 data is located after the FP32 data.  Compute size of the FP32 data and trigs.
-    defines += toDefine("DISTGF31",      FP32_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF31",      FP32_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF31", SMALLTRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF31", MIDDLETRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF31", SMALLTRIGCOMBO_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
   }
   else if (fft.FFT_FP32 && fft.NTT_GF61) {
     // GF61 data is located after the FP32 data.  Compute size of the FP32 data and trigs.
-    defines += toDefine("DISTGF61",      FP32_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF61",      FP32_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF61", SMALLTRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF61", MIDDLETRIG_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF61", SMALLTRIGCOMBO_FP32_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
@@ -791,7 +812,7 @@ defines += toDefine("TRIG_COS", cosCoefs + '}');
     defines += toDefine("DISTMTRIGGF31", 0);
     defines += toDefine("DISTHTRIGGF31", 0);
     // GF61 data is located after the GF31 data.  Compute size of the GF31 data and trigs.
-    defines += toDefine("DISTGF61",      GF31_DATA_SIZE(fft.shape.width, fft.shape.middle, fft.shape.height, in_place, pad_size) / 2);
+    defines += toDefine("DISTGF61",      GF31_DATA_SIZE(nDataElements) / 2);
     defines += toDefine("DISTWTRIGGF61", SMALLTRIG_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
     defines += toDefine("DISTMTRIGGF61", MIDDLETRIG_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height));
     defines += toDefine("DISTHTRIGGF61", SMALLTRIGCOMBO_GF31_DIST(fft.shape.width, fft.shape.middle, fft.shape.height, fft.shape.nH()));
@@ -1152,6 +1173,10 @@ static std::map<string, int> registerProfile(const Args& args, const FFTConfig& 
   return result;
 }
 
+u32 Gpu::dataElements() const {
+  return u32(middleDataElements(WIDTH, fft.shape.middle, SMALL_H, in_place, int(pad_size), in_wg, in_sizex, out_wg, out_sizex));
+}
+
 Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, bool logFftSize) :
   shared(s),
   background{shared.background},
@@ -1169,7 +1194,8 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   useLongCarry{args.carry == CARRY_64},
   queue{*shared.context, args.profile},
   auxQueues{},    
-  compiler{args, shared.context, clDefines(args, shared.context->deviceId(), fft, extraConf, E, logFftSize, tail_single_wide, tail_single_kernel, in_place, pad_size, wmul, cuda_graph_squares_)},
+  compiler{args, shared.context, clDefines(args, shared.context->deviceId(), fft, extraConf, E, logFftSize, tail_single_wide, tail_single_kernel, in_place, pad_size, wmul,
+                                          cuda_graph_squares_, in_wg, in_sizex, out_wg, out_sizex)},
 
 #define K(name, ...) name(#name, &compiler, profile.make(#name), &queue, __VA_ARGS__)
 
@@ -1426,14 +1452,14 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   BUF(bufROE, ROE_SIZE),
   BUF(bufStatsCarry, CARRY_SIZE),
 
-  BUF(buf1, TOTAL_DATA_SIZE(fft, WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size)),
-  BUF(buf2, TOTAL_DATA_SIZE(fft, WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size)),
-  BUF(buf3, TOTAL_DATA_SIZE(fft, WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size)),
+  BUF(buf1, TOTAL_DATA_SIZE(fft, dataElements())),
+  BUF(buf2, TOTAL_DATA_SIZE(fft, dataElements())),
+  BUF(buf3, TOTAL_DATA_SIZE(fft, dataElements())),
 #if defined(__APPLE__)
   BUF(bufAppleTailZeroGF61, fft.NTT_GF61 ? 8 * SMALL_H : 0),
   // One GF61-only plane for Apple tailMul ping-pong.  This is smaller than a
   // full combined GF31/GF61 transform buffer and is unused on other platforms.
-  BUF(bufAppleTailMulGF61, fft.NTT_GF61 ? GF61_DATA_SIZE(WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size) : 0),
+  BUF(bufAppleTailMulGF61, fft.NTT_GF61 ? GF61_DATA_SIZE(dataElements()) : 0),
 #endif
 #undef BUF
 
@@ -2316,7 +2342,7 @@ void Gpu::replay(void) {
               throw std::runtime_error("Apple staged GF61 tailMul requires three distinct transform buffers");
             if (!(fft.NTT_GF31 && fft.NTT_GF61) || fft.FFT_FP32 || fft.FFT_FP64)
               throw std::runtime_error("Apple staged GF61 tailMul expects the GF31/GF61 Aevum layout");
-            const u32 fullBase = GF31_DATA_SIZE(WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size) / 2;
+            const u32 fullBase = GF31_DATA_SIZE(dataElements()) / 2;
             const u32 rawBase = 0;
             Buffer<double>* raw = &bufAppleTailMulGF61;
 
@@ -2382,7 +2408,7 @@ void Gpu::replay(void) {
               throw std::runtime_error("Apple staged GF61 tailMulLow requires three distinct transform buffers");
             if (!(fft.NTT_GF31 && fft.NTT_GF61) || fft.FFT_FP32 || fft.FFT_FP64)
               throw std::runtime_error("Apple staged GF61 tailMulLow expects the GF31/GF61 Aevum layout");
-            const u32 fullBase = GF31_DATA_SIZE(WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size) / 2;
+            const u32 fullBase = GF31_DATA_SIZE(dataElements()) / 2;
             const u32 rawBase = 0;
             Buffer<double>* raw = &bufAppleTailMulGF61;
 
@@ -2798,7 +2824,7 @@ vector<Buffer<Word>> Gpu::makeBufVector(u32 size) {
 
 vector<Buffer<double>> Gpu::makeTransformBufVector(u32 size) {
   vector<Buffer<double>> r;
-  const size_t transform_words = TOTAL_DATA_SIZE(fft, WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size);
+  const size_t transform_words = TOTAL_DATA_SIZE(fft, dataElements());
   for (u32 i = 0; i < size; ++i) { r.emplace_back(timeBufVect, &queue, transform_words); }
   return r;
 }
@@ -2826,8 +2852,8 @@ void Gpu::regDebugSquareTrace(Buffer<Word>& io, u64* trace, size_t trace_count) 
   if (!trace || trace_count < 12) throw std::runtime_error("square trace requires 12 uint64 values");
   std::fill(trace, trace + trace_count, 0);
 
-  const size_t gf31_doubles = fft.NTT_GF31 ? GF31_DATA_SIZE(WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size) : 0;
-  const size_t gf61_doubles = fft.NTT_GF61 ? GF61_DATA_SIZE(WIDTH, fft.shape.middle, SMALL_H, in_place, pad_size) : 0;
+  const size_t gf31_doubles = fft.NTT_GF31 ? GF31_DATA_SIZE(dataElements()) : 0;
+  const size_t gf61_doubles = fft.NTT_GF61 ? GF61_DATA_SIZE(dataElements()) : 0;
 
   auto hashTransform = [&](Buffer<double>& b, size_t slot) {
     queue.finish();
