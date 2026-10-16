@@ -496,7 +496,7 @@ ENGINE_EQUAL_GPU_TEST := build-tests/aevum-engine-equal-canonical-gpu-test
 
 .PHONY: test-engine-equal-gpu
 test-engine-equal-gpu: engine-lib $(ENGINE_EQUAL_GPU_TEST)
-	$(ENGINE_EQUAL_GPU_TEST) $(ENGINE_LIB) ${AEVUM_TEST_DEVICE:-0} . "${AEVUM_TEST_FFT:-}"
+	$(ENGINE_EQUAL_GPU_TEST) $(ENGINE_LIB) $(if $(AEVUM_TEST_DEVICE),$(AEVUM_TEST_DEVICE),0) . "$(AEVUM_TEST_FFT)"
 
 $(ENGINE_EQUAL_GPU_TEST): tests/engine_equal_canonical_gpu_test.cpp src/EngineApi.h
 	@mkdir -p $(dir $@)
