@@ -91,6 +91,16 @@ G_H        "group height" == SMALL_HEIGHT / NH
 #define OLD_FENCE 1
 #endif
 
+// Keep the host allocation/sizing default and OpenCL layout specialization
+// coupled: NVIDIA uses the in-place middle/tail layout by default.
+#if !defined(INPLACE)
+#if NVIDIAGPU
+#define INPLACE 1
+#else
+#define INPLACE 0
+#endif
+#endif
+
 // Nontemporal reads and writes might be a little bit faster on many GPUs by keeping more reusable data in the caches.
 // However, on those GPUs with large caches there should be a significant speed gain from keeping FFT data in the caches.
 // Default to the big win when caching is beneficial rather than the tiny gain when non-temporal is better.
@@ -263,6 +273,17 @@ typedef ulong2 GF61;        // A complex value using two Z61s.  For a GF(M61^2) 
 #define FFT32           53
 #if FFT_TYPE < 0 || (FFT_TYPE > 4 && FFT_TYPE < 50) || FFT_TYPE > 53
 #error - unsupported FFT/NTT
+#endif
+
+// Experimental PRPLL full-hybrid CRT/carry chain. Unset/0 preserves the stock path.
+#ifndef AEVUM_EXPERIMENT_LEAN_CARRY128
+#define AEVUM_EXPERIMENT_LEAN_CARRY128 0
+#endif
+#if AEVUM_EXPERIMENT_LEAN_CARRY128 != 0 && AEVUM_EXPERIMENT_LEAN_CARRY128 != 1
+#error AEVUM_EXPERIMENT_LEAN_CARRY128 must be 0 or 1
+#endif
+#if AEVUM_EXPERIMENT_LEAN_CARRY128 && FFT_TYPE != FFT323161
+#error lean i128 carry requires full Type4
 #endif
 
 // The FP64 FFT can save a few FP64 ops by applying some of the weights using FMA.  nVidia compilers are clever enough to do this automatically.

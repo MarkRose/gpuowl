@@ -1,6 +1,8 @@
 // Copyright (C) Mihai Preda and George Woltman
 
+#ifndef AEVUM_GF61_CMUL_ALT
 #define AEVUM_GF61_CMUL_ALT 1
+#endif
 #include "base.cl"
 #include "fft-middle.cl"
 #include "middle.cl"
@@ -229,7 +231,11 @@ KERNEL(IN_WG) fftMiddleInGF61(P(T2) out, CP(T2) in, Trig trig) {
   pfaMiddleTwiddle(u, x, y, trig61);
   fft_MIDDLE(u);
 #else
+#if AEVUM_GF61_MIDDLE_BASE_TABLE == 1 || AEVUM_GF61_MIDDLE_BASE_TABLE == 3
+  middleMul2BaseTable(u, x, y, y * WIDTH + x, trig61);
+#else
   middleMul2(u, x, y, trig61);
+#endif
   fft_MIDDLE(u);
   middleMul(u, y, trig61);
 #endif
@@ -642,7 +648,11 @@ KERNEL(256) fftMiddleInGF61(P(T2) out, P(T2) in, Trig trig) {
   u32 N = SMALL_HEIGHT / 16;
   u32 starty = g % N * 16;
   u32 startx = g / N * 16;
-  u32 zerohack = 0;                                // Need to test if g / 131072 is of any benefit
+#if AMDGPU
+  u32 zerohack = (MIDDLE >= 16) ? 0 : g / 131072;
+#else
+  u32 zerohack = 0;
+#endif
 #else                                              // AMD friendly padding, vary x fast?  I've no explanation for why that would be better
   u32 N = WIDTH / 16;
   u32 startx = g % N * 16;
@@ -664,7 +674,11 @@ KERNEL(256) fftMiddleInGF61(P(T2) out, P(T2) in, Trig trig) {
   pfaMiddleTwiddle(u, x, y, trig61);
   fft_MIDDLE(u);
 #else
+#if AEVUM_GF61_MIDDLE_BASE_TABLE == 1 || AEVUM_GF61_MIDDLE_BASE_TABLE == 3
+  middleMul2BaseTable(u, x, y, y * WIDTH + x, trig61);
+#else
   middleMul2(u, x, y, trig61);
+#endif
   fft_MIDDLE(u);
   middleMul(u, y, trig61);
 #endif
