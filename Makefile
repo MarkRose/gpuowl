@@ -547,3 +547,13 @@ $(FFT_CARRY32_GATE_TEST): tests/fft_carry32_gate_test.cpp src/FFTConfig.cpp src/
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra $(TEST_SECTION_FLAGS) -Isrc \
 		tests/fft_carry32_gate_test.cpp src/PrpUseTune.cpp src/RuntimeAutotune.cpp src/FFTConfig.cpp src/Args.cpp src/TuneEntry.cpp src/common.cpp src/fs.cpp src/File.cpp src/timeutil.cpp \
 		$(TEST_GC_LINK) -o $@
+# Trig cache key fields (cherubrock-seb/PrMers#107)
+TRIG_CACHE_KEY_TEST := build-tests/aevum-trig-cache-key-test
+.PHONY: test-trig-cache-key
+test-host: test-trig-cache-key
+test-trig-cache-key: $(TRIG_CACHE_KEY_TEST)
+	$(TRIG_CACHE_KEY_TEST)
+
+$(TRIG_CACHE_KEY_TEST): tests/trig_cache_key_test.cpp src/TrigBufCache.h
+	@mkdir -p build-tests
+	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/trig_cache_key_test.cpp -o $@
