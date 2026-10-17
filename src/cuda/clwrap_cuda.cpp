@@ -33,8 +33,22 @@ using namespace std;
 // We need to convert these to CUdeviceptr for CUDA kernel launch.
 static unordered_set<cl_mem> g_allocatedBuffers;
 
-// Global CUDA context — set once by clCreateContext, used to ensure current before CUDA calls
+// CUDA autotune temporarily creates a second context. Keep the live
+// contexts in creation order so destroying a temporary tuning context restores
+// the production context used by APIs that do not carry an owning context.
 static CUcontext g_cudaContext = nullptr;
+static vector<CUcontext> g_cudaContexts;
+
+static void rememberCudaContext(CUcontext ctx) {
+  g_cudaContexts.push_back(ctx);
+  g_cudaContext = ctx;
+}
+
+static void forgetCudaContext(CUcontext ctx) {
+  auto it = find(g_cudaContexts.begin(), g_cudaContexts.end(), ctx);
+  if (it != g_cudaContexts.end()) g_cudaContexts.erase(it);
+  g_cudaContext = g_cudaContexts.empty() ? nullptr : g_cudaContexts.back();
+}
 
 // The OpenCL-style status for a CUDA driver result.  Only a result that means a lost, reset or faulted device or
 // context maps to the status that reads as a lost GPU; an out-of-memory maps to the allocation status and anything
@@ -124,7 +138,7 @@ cl_context clCreateContext(const intptr_t*, unsigned nDevices, const cl_device_i
     if (err) *err = clStatusFromCu(r);
     return nullptr;
   }
-  g_cudaContext = ctx->ctx;  // Track for ensureContextCurrent()
+  rememberCudaContext(ctx->ctx);
 
   // L2 persistence: no benefit measured for this workload.
   // cuCtxSetLimit(CU_LIMIT_PERSISTING_L2_CACHE_SIZE, 16 * 1024 * 1024);
@@ -135,7 +149,10 @@ cl_context clCreateContext(const intptr_t*, unsigned nDevices, const cl_device_i
 
 int clReleaseContext(cl_context ctx) {
   if (ctx) {
-    cuCtxDestroy(ctx->ctx);
+    const CUcontext dead = ctx->ctx;
+    forgetCudaContext(dead);
+    cuCtxDestroy(dead);
+    if (g_cudaContext) cuCtxSetCurrent(g_cudaContext);
     delete ctx;
   }
   return CL_SUCCESS;
