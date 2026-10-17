@@ -93,9 +93,11 @@ all: aevum
 
 ENGINE_BIN = build-engine
 ENGINE_SRCS = $(filter-out main.cpp,$(SRCS1))
-ENGINE_OBJS = $(ENGINE_SRCS:%.cpp=$(ENGINE_BIN)/%.o)
+ENGINE_CUDA_SRCS = $(CUDASRCS1)
+ENGINE_CUDA_OBJS = $(ENGINE_CUDA_SRCS:%.cpp=$(ENGINE_BIN)/cuda/%.o)
+ENGINE_OBJS = $(ENGINE_CUDA_OBJS) $(ENGINE_SRCS:%.cpp=$(ENGINE_BIN)/%.o)
 ENGINE_DEPDIR := $(ENGINE_BIN)/.d
-ENGINE_FLAGS = -O3 -DNDEBUG -Wall -std=c++20 $(DARWIN_MIN_FLAGS) -fPIC -fvisibility=hidden -DAEVUM_ENGINE_LIBRARY
+ENGINE_FLAGS = -O3 -DNDEBUG -Wall -std=c++20 $(DARWIN_MIN_FLAGS) -fPIC -fvisibility=hidden -DAEVUM_ENGINE_LIBRARY $(CUDAFLAGS)
 ENGINE_LIB = $(ENGINE_BIN)/libaevum_engine.so
 
 .PHONY: engine-lib
@@ -105,7 +107,7 @@ $(ENGINE_LIB): $(ENGINE_OBJS)
 	$(CXX) $(ENGINE_LINK_FLAGS) -o $@ $^ $(LIBPATH) $(OPENCL_LIBS)
 
 $(ENGINE_BIN)/%.o: src/%.cpp
-	@mkdir -p $(dir $@) $(ENGINE_DEPDIR)
+	@mkdir -p $(dir $@) $(dir $(ENGINE_DEPDIR)/$*.d)
 	$(CXX) $(ENGINE_FLAGS) $(CPPFLAGS) -MMD -MP -MF $(ENGINE_DEPDIR)/$*.d -c $< -o $@
 
 aevum: $(BIN)/aevum
