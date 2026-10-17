@@ -1871,10 +1871,11 @@ if (rtx3080_type1_regcf3161_2) {
   }
 }
 
-// On the same validated RTX 3080 Type1 PRP band, allowing the compiler to
-// choose fftMiddleOutGF61 register usage instead of forcing the historical
-// 64-register cap was word-exact and improved throughput. Keep this minimal
-// and GF61-only; REGMO31=-1 had no material benefit.
+// On the same validated RTX 3080 Type1 PRP band, a measured 80-register cap
+// for fftMiddleOutGF61 outperforms both the historical 64-register cap and the
+// compiler-default (-1) policy. The cap removes local spilling while allowing
+// the kernel to use 74 registers. Keep this minimal and GF61-only; REGMO31=-1
+// had no material benefit.
 const bool rtx3080_type1_regmo61_default =
     register_profiles_enabled &&
     !explicit_cuda_midout61_registers &&
@@ -1887,10 +1888,10 @@ const bool rtx3080_type1_regmo61_default =
     fft.spec() == "1:512:8:512:202";
 
 if (rtx3080_type1_regmo61_default) {
-  pfa_use.emplace_back("REGMO61", "-1");
+  pfa_use.emplace_back("REGMO61", "80");
   if (verbose) {
     log("AEVUM_CUDA_REG_PROFILE source=rtx3080-type1-auto shape=%s "
-        "profile=REGMO61=-1 range=135000013..158000003\n",
+        "profile=REGMO61=80 range=135000013..158000003\n",
         fft.spec().c_str());
   }
 }
