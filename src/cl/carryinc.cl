@@ -169,7 +169,7 @@ Word2 OVERLOAD weightAndCarryPairSloppy(T2 u, GF31 u31, T invWeight1, T invWeigh
 
 // Apply inverse weight, add in optional carry, calculate roundoff error, convert to integer. Handle MUL3.
 // This helper is instantiated for each iCARRY width by carryutil.cl.
-i64 weightAndCarryOne(float uF2, Z31 u31, float F2_invWeight, u32 m31_invWeight, iCARRY inCarry, float* maxROE) {
+i64 OVERLOAD weightAndCarryOne(float uF2, Z31 u31, float F2_invWeight, u32 m31_invWeight, iCARRY inCarry, float* maxROE) {
 
   // Apply inverse weight and get the Z31 data
   u31 = shr(u31, m31_invWeight);
