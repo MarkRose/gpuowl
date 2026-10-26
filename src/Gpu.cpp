@@ -2074,22 +2074,57 @@ vector<Word> Gpu::readChecked(Buffer<Word>& buf) {
     bufSumOut.readAsync(expectedVect);
 
     vector<Word> data = readOut(buf);
-    u64 hostSum = 0;
-    for (auto it = data.begin(), end = data.end(); it < end; ++it) hostSum += u64(*it);
-
-    u64 const gpuSum = expectedVect[0];
-    if (hostSum == gpuSum) {
+    if (readOK(data, expectedVect[0])) {
       // A buffer containing all-zero is exceptional, so mark that through the empty vector.
-      if (gpuSum == 0 && isAllZero(data)) {
+      if (expectedVect[0] == 0 && isAllZero(data)) {
         log("Read ZERO\n");
         return {};
       }
       return data;
     }
-
-    log("GPU read failed: %016" PRIx64 " (gpu) != %016" PRIx64 " (host)\n", gpuSum, hostSum);
   }
   throw "GPU persistent read errors";
+}
+
+// Does the host's sum of the words read match the GPU's sum64?
+bool Gpu::readOK(const vector<Word>& data, u64 gpuSum) {
+  u64 hostSum = 0;
+  for (auto it = data.begin(), end = data.end(); it < end; ++it) hostSum += u64(*it);
+  if (hostSum == gpuSum) { return true; }
+  log("GPU read failed: %016" PRIx64 " (gpu) != %016" PRIx64 " (host)\n", gpuSum, hostSum);
+  return false;
+}
+
+// readChecked without waiting for the transfer: the GPU work (sum64, transpOut) and the read are queued, and the Background thread
+// waits for the read, expands, reorders and verifies the words and hands them to onRead.  A bad read (wrong sum or all zero) is not
+// retried, since the GPU has moved on: it sets deferredReadBad, and the main loop reloads.  The in-order queue finishes the read
+// before any later command touches bufAux or bufSumOut.  Background runs its tasks in order, so onRead runs before any task queued
+// after this call.  CUDA: the read is blocking (the CUDA layer has no read events), only the host work moves to Background.
+void Gpu::readCheckedAsync(Buffer<Word>& buf, std::function<void(vector<Word>&&)> onRead) {
+  bufSumOut.zero();
+  sum64(bufSumOut, N, buf);
+  auto gpuSum = make_shared<vector<u64>>(1);
+  bufSumOut.readAsync(*gpuSum);
+  transpOut(bufAux, buf);
+  auto raw = make_shared<vector<Word>>(bufAux.size);
+#if CUDA_BACKEND
+  bufAux.read(*raw);
+  shared_ptr<EventHolder> done;
+#else
+  auto done = make_shared<EventHolder>(::read(queue.get(), {}, false, bufAux.get(), raw->size() * sizeof(Word), raw->data(), true));
+  ::flush(queue.get());               // Background waits for this read, so it must be submitted now, not at the next marker or finish
+#endif
+  (*background)([this, gpuSum, raw, done, onRead = std::move(onRead), link = logLink()] {
+    LogLinkScope const logScope{link};  // Log to this worker's log file, not just stdout
+    if (done) { waitForEvents({done->get()}); }
+    vector<Word> data = logicalOrder(expandWords(std::move(*raw)));
+    if (!readOK(data, (*gpuSum)[0]) || ((*gpuSum)[0] == 0 && isAllZero(data))) {
+      log("Deferred read of a log point's residue failed, reloading\n");
+      deferredReadBad = true;
+      return;
+    }
+    onRead(std::move(data));
+  });
 }
 
 Words Gpu::readAndCompress(Buffer<Word>& buf)  { return compactBits(readChecked(buf), E); }
@@ -2189,11 +2224,12 @@ void Gpu::logTimeKernels() {
   profile.reset();
 }
 
-vector<Word> Gpu::readWords(Buffer<Word> &buf) {
+vector<Word> Gpu::readWords(Buffer<Word> &buf) { return expandWords(buf.read()); }
+
+vector<Word> Gpu::expandWords(vector<Word>&& GPUdata) {
   // GPU is returning either 4-byte or 8-byte integers.  C++ code is expecting 8-byte integers.  Handle the "no conversion" case.
-  if (fft.WordSize == 8) return buf.read();
+  if (fft.WordSize == 8) return std::move(GPUdata);
   // Convert 32-bit GPU Words into 64-bit C++ Words
-  vector<Word> GPUdata = buf.read();
   vector<Word> CPUdata;
   CPUdata.resize(GPUdata.size() * 2);
   for (u32 i = 0; i < GPUdata.size(); ++i) {
@@ -2236,7 +2272,10 @@ static vector<u32> pfaPairMap(const FFTShape& shape) {
 
 vector<Word> Gpu::readOut(Buffer<Word> &buf) {
   transpOut(bufAux, buf);
-  vector<Word> words = readWords(bufAux);
+  return logicalOrder(readWords(bufAux));
+}
+
+vector<Word> Gpu::logicalOrder(vector<Word>&& words) {
   if (fft.shape.isPfa()) {
     vector<u32> const map = pfaPairMap(fft.shape);
     vector<Word> logical(words.size());
@@ -2984,6 +3023,9 @@ PRPResult Gpu::isPrimePRP([[maybe_unused]] const Task& task) {
   u32 const logStep = args.logStep;
 
  reload:
+  // Let the queued saves and deferred reads (readCheckedAsync) finish, so the savefiles are complete before one is loaded
+  background->waitEmpty();
+  deferredReadBad = false;
   elapsedTimer.reset();
   u32 blockSize{};
   u64 k{};
@@ -3103,27 +3145,27 @@ PRPResult Gpu::isPrimePRP([[maybe_unused]] const Task& task) {
 
     if (!doCheck && !doLog) continue;
 
-    u64 const res = dataResidue();
-    float const secsPerIt = iterationTimer.reset(k);
-    queue.setSquareTime((int) (secsPerIt * 1'000'000));
-
-    vector<Word> rawCheck = readChecked(bufCheck);
-    if (rawCheck.empty()) {
+    if (deferredReadBad.exchange(false)) {
       ++nErrors;
-      log("%9" PRIu64 " %016" PRIx64 " read NULL check\n", k, res);
       if (++nSeqErrors > 2) { throw "sequential errors"; }
       goto reload;
     }
+
+    u64 const res = dataResidue();
+    float const secsPerIt = iterationTimer.reset(k);
+    queue.setSquareTime((int) (secsPerIt * 1'000'000));
 
     // Once a proof residue could not be written, no checkpoint may be written past it (the background thread runs
     // the queued saves in order, so this is checked when each save runs) and the test stops.
     if (proofSaveFailed) { throw "proof residue write failed"; }
 
     if (!doCheck) {
-      (*background)([=, this, rawCheck = std::move(rawCheck)] {
+      // The unverified save does not decide anything here, so its check residue is read without waiting (readCheckedAsync)
+      double const elapsed = elapsedBefore + elapsedTimer.at();
+      readCheckedAsync(bufCheck, [=, this](vector<Word>&& rawCheck) {
         if (proofSaveFailed) { return; }
         getSaver()->saveUnverified({.exponent=E, .k=k, .blockSize=blockSize, .res64=res, .check=compactBits(rawCheck, E), .nErrors=nErrors,
-                                    .elapsed=elapsedBefore + elapsedTimer.at()});
+                                    .elapsed=elapsed});
       });
 
       log("   %9" PRIu64 " %016" PRIx64 " %s\n", k, res, formatSecsPerIter(secsPerIt).c_str());
@@ -3134,6 +3176,14 @@ PRPResult Gpu::isPrimePRP([[maybe_unused]] const Task& task) {
         log("Carry: %x Z(%u)=%.1f\n", m, carryStats.N, z);
       }
     } else {
+      vector<Word> rawCheck = readChecked(bufCheck);
+      if (rawCheck.empty()) {
+        ++nErrors;
+        log("%9" PRIu64 " %016" PRIx64 " read NULL check\n", k, res);
+        if (++nSeqErrors > 2) { throw "sequential errors"; }
+        goto reload;
+      }
+
       bool const ok = this->doCheck(blockSize);
       [[maybe_unused]] float const secsCheck = iterationTimer.reset(k);
 

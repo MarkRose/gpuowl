@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <cmath>
 #include <atomic>
+#include <functional>
 
 struct PRPResult;
 class Task;
@@ -91,6 +92,8 @@ class Gpu {
   // checkpoint queued after that point is skipped and the PRP test is aborted, so a restart resumes from
   // the last checkpoint before the failed residue and writes it again.
   std::atomic<bool> proofSaveFailed{false};
+  // A log point's check residue whose deferred read (readCheckedAsync) came back bad: the main loop reloads at its next log point.
+  std::atomic<bool> deferredReadBad{false};
 
 public:
   Args args;     // This Gpu's own copy: the shared args plus the FFT's tune.txt settings (see withFftUses)
@@ -272,9 +275,11 @@ private:
   void carryFusedLL(Buffer<double>& buf);
 
   vector<Word> readWords(Buffer<Word> &buf);
+  vector<Word> expandWords(vector<Word>&& gpuWords);
   void writeWords(Buffer<Word>& buf, vector<Word> &words);
 
   vector<Word> readOut(Buffer<Word> &buf);
+  vector<Word> logicalOrder(vector<Word>&& words);
   void writeIn(Buffer<Word>& buf, vector<Word>&& words);
 
   enum LEAD_TYPE {LEAD_NONE = 0, LEAD_WIDTH = 1, LEAD_MIDDLE = 2};
@@ -313,6 +318,8 @@ private:
   PRPState loadPRP(Saver<PRPState>& saver);
 
   vector<Word> readChecked(Buffer<Word>& buf);
+  bool readOK(const vector<Word>& data, u64 gpuSum);
+  void readCheckedAsync(Buffer<Word>& buf, std::function<void(vector<Word>&&)> onRead);
 
   // void measureTransferSpeed();
 
