@@ -1084,17 +1084,17 @@ void Tune::tune() {
       if (!fft.NTT_GF31) fft = FFTConfig(FFTShape(FFT3161, 512, 7, 512), 202, CARRY_AUTO);
       u64 const exponent = primes.prevPrime(fft.maxExp());
       u32 best_modm31 = 0;
-      u32 const current_modm31 = args->value("MODM31", 0);
+      u32 const current_modm31 = args->value("MODM31", AMDGPU ? 3 : 0);
       double best_cost = -1.0;
       double current_cost = -1.0;
-      for (u32 const modm31 : {0, 1, 2}) {
+      for (u32 const modm31 : {0, 1, 2, 3}) {
         args->flags["MODM31"] = to_string(modm31);
         double const cost = timeConfig(exponent, shared, fft, {}, quick);
         log("Time for %12s using MODM31=%u is %6.1f\n", fft.spec().c_str(), modm31, cost);
         if (modm31 == current_modm31) current_cost = cost;
         if (best_cost < 0.0 || cost < best_cost) { best_cost = cost; best_modm31 = modm31; }
       }
-      log("Best MODM31 is %u.  Default MODM31 is 0.\n", best_modm31);
+      log("Best MODM31 is %u.  Default MODM31 is %u.\n", best_modm31, AMDGPU ? 3 : 0);
       configsUpdate(current_cost, best_cost, 0.000, "MODM31", best_modm31, newConfigKeyVals, suggestedConfigKeyVals);
       args->flags["MODM31"] = to_string(best_modm31);
     }
