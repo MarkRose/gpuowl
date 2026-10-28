@@ -1177,6 +1177,8 @@ void Tune::tune() {
       log("Best 256RADIX8_H is %u.  Default 256RADIX8_H is 0.\n", best_radix8_h);
       configsUpdate(current_cost, best_cost, 0.003, "256RADIX8_H", best_radix8_h, newConfigKeyVals, suggestedConfigKeyVals);
       args->flags["256RADIX8_H"] = to_string(best_radix8_h);
+    }
+
     // Time a key's values on the default shape, as the blocks above, and keep the fastest.  These keys move the time by well under
     // 1 % on the GPUs measured so far, about the noise of one timing, so only a 1 % gain is written to config.txt (the rest are suggested).
     auto const tuneKey = [&](const char *key, initializer_list<u32> values, u32 deflt) {
