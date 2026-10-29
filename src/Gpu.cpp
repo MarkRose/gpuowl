@@ -4242,6 +4242,9 @@ PRPResult Gpu::isPrimePRP(const Task& task) {
         doBigLog(k, res, ok, secsPerIt, kEndEnd, nErrors);
 
         if (k >= kEndEnd) {
+          // The proof residue at k == E is written by the background thread; make sure it is on disk before
+          // computeProof() reads it back.
+          background->waitEmpty();
           fs::path proofFile = saveProof(args, proofSet);
           return {isPrime, finalRes64, nErrors, proofFile.string(), toHex(res2048)};
         }        

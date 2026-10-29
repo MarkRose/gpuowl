@@ -594,6 +594,12 @@ $(STRICT_INT_TEST): tests/strict_int_test.cpp src/StrictInt.h
 	@mkdir -p build-tests
 	$(CXX) -O2 -std=c++20 $(DARWIN_MIN_FLAGS) -Wall -Wextra -Isrc tests/strict_int_test.cpp -o $@
 
+# isPrimePRP() waits for the Background thread before computing the proof (source check, no device)
+.PHONY: test-proof-background-join
+test-host: test-proof-background-join
+test-proof-background-join:
+	python3 tests/proof_background_join_source_test.py
+
 # carryFused: warp sync() on both sides of the per-wavefront ready flag
 .PHONY: test-carryfused-ready-sync
 test-host: test-carryfused-ready-sync
