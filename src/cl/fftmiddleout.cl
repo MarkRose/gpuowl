@@ -1,6 +1,6 @@
 // Copyright (C) Mihai Preda and George Woltman
 
-#define MIDDLE_KERNEL 1   // see weakModM61
+#define MIDDLE_KERNEL 1   // see weakModM61 and middleMul
 #include "base.cl"
 #include "fft-middle.cl"
 
