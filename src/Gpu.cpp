@@ -319,6 +319,9 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, u32 nW, u32 n
                               "BCAST_SLOT_W","BCAST_SLOT_H",   // Experimental, FFT variant 2: broadcast the f > 1 twiddles through a private LDS slot (see base.cl)
                               "TAIL_RELABEL",           // Experimental, single-wide FP64 tailSquare: the partner line's lanes relabeled instead of reverseLine (see tailsquare.cl)
                               "DD_TRIG",                // Experimental, FP64-only FFTs: tabMul twiddles as hi + lo (see fftbase.cl)
+                              "SHUFL_BYTES_W","SHUFL_BYTES_H",   // Bytes per LDS transpose step of fft_WIDTH/fft_HEIGHT (-tune sweeps them)
+                              "FUSE_WEIGHT_BUTTERFLY",  // -tune sweeps it
+                              "OLD_FENCE",              // -tune sweeps it on nVidia (see the OLD_FENCE check below)
 			      "LDSPAD_W","LDSPAD_H",
 			      "LDSSWIZ_W","LDSSWIZ_H",
 			      "L2_STRIPING",
