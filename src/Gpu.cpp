@@ -53,9 +53,12 @@ CARRY_LEN = 8
 
 // NTT_WEIGHT_TABLE default.  On an RX 7900 XTX (gfx1100) the table (4 bytes per word) makes carryFused 2-3.5 % faster at WIDTH 512 up to
 // 4M words (1:512:8:512 0.8 % per iteration), where the FFT data and the table stay in the 96 MB Infinity Cache.  From 1:512:11:512 up, and at
-// WIDTH 1024 (carryFused 113 -> 124 VGPRs, 12 -> 10 waves), it is slower.  Other GPUs are untested: off (try it with -tune or -use).
+// WIDTH 1024 (carryFused 113 -> 124 VGPRs, 12 -> 10 waves), it is slower.  The 7900 XT (80 MB) and 7900 GRE (64 MB) are gfx1100 too, with less
+// Infinity Cache, so at 4M words (about 64 MB of data and table) they may already lose.  Their 20 and 16 GB set them apart from the XTX's 24 GB
+// (and the 48 GB W7900, which has the XTX's 96 MB).  Other GPUs are untested: off (try it with -tune or -use).
 u32 nttWeightTableDefault(cl_device_id id, FFTConfig fft) {
-  return fft.shape.fft_type == FFT3161 && isAmdGpu(id) && getDeviceName(id).starts_with("gfx1100") && fft.shape.width <= 512 && fft.size() <= (4u << 20);
+  return fft.shape.fft_type == FFT3161 && isAmdGpu(id) && getDeviceName(id).starts_with("gfx1100") && getGpuRamGB(id) > 22
+      && fft.shape.width <= 512 && fft.size() <= (4u << 20);
 }
 
 namespace {
