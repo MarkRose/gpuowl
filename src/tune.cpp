@@ -1228,6 +1228,11 @@ void Tune::tune() {
       tuneKey("FUSE_WEIGHT_BUTTERFLY", {0, 1}, AMDGPU ? 1 : 0);
     }
 
+    // Find best NTT_WEIGHT_TABLE setting (M31+M61 only, see genWeights)
+    if (FFTConfig const fft{*defaultShape, variant, CARRY_AUTO}; fft.shape.fft_type == FFT3161) {
+      tuneKey("NTT_WEIGHT_TABLE", {0, 1}, nttWeightTableDefault(shared.context->deviceId(), fft));
+    }
+
     // Find best OLD_FENCE setting (two fewer full barriers per carryFused group without it).  CUDA build only: off AMD and nVidia
     // OLD_FENCE=0 is not safe (see Gpu.cpp), on AMD, where 0 is the default, OLD_FENCE=1 measured no faster (7900 XTX), and nVidia's
     // OpenCL fails to link OLD_FENCE=0's atomic_store on a global atomic_uint (RTX 4070 SUPER).

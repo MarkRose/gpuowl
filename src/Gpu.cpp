@@ -29,6 +29,7 @@
 #include <cmath>
 #include <ranges>
 #include <utility>
+#include <bit>
 
 #ifndef M_PIl
 #define M_PIl 3.141592653589793238462643383279502884L
@@ -49,6 +50,13 @@
 enum {
 CARRY_LEN = 8
 };
+
+// NTT_WEIGHT_TABLE default.  On an RX 7900 XTX (gfx1100) the table (4 bytes per word) makes carryFused 2-3.5 % faster at WIDTH 512 up to
+// 4M words (1:512:8:512 0.8 % per iteration), where the FFT data and the table stay in the 96 MB Infinity Cache.  From 1:512:11:512 up, and at
+// WIDTH 1024 (carryFused 113 -> 124 VGPRs, 12 -> 10 waves), it is slower.  Other GPUs are untested: off (try it with -tune or -use).
+u32 nttWeightTableDefault(cl_device_id id, FFTConfig fft) {
+  return fft.shape.fft_type == FFT3161 && isAmdGpu(id) && getDeviceName(id).starts_with("gfx1100") && fft.shape.width <= 512 && fft.size() <= (4u << 20);
+}
 
 namespace {
 
@@ -89,9 +97,38 @@ float invWeightM132(u32 N, u64 E, u32 H, u32 line, u32 col, u32 rep) {
   return float(expm1(M_LN2 * - (double)(extra(N, E, kAt(H, line, col) + rep)) / N));
 }
 
-Weights genWeights(FFTConfig fft, u64 E, u32 W, u32 H, u32 nW, bool nvidiaGpu) {
+Weights genWeights(FFTConfig fft, u64 E, u32 W, u32 H, u32 nW, bool nvidiaGpu, bool nttWeightTable) {
   u32 const N = 2u * W * H;
   u32 const groupWidth = W / nW;
+
+  // NTT_WEIGHT_TABLE (M31+M61): carryFused reads each pair's weight shifts and big-word flags instead of stepping its combo counters.
+  // The weight of word j is 2^(ceil(j * E / N) - j * E / N), i.e. a shift of k(j) = (c(j) - j * (E % N) / N) mod q, c(j) = ceil(j * (E % N) / N),
+  // with 1/N taken mod q (2^q = 1 mod 2^q - 1).  Word j is big when c(j + 1) > c(j).  Two u32 per pair p, the pair at column x of line g
+  // (x * H + g, or pfaPair(x, g) with PFA, see base.cl), at line * W + x, the order of carryFused's loads.  First the inverse weights:
+  // bits 0-4 and 5-9 the M31 shifts (k + log2(N / R) + 1) mod 31 of words 2p and 2p + 1 (carryFused's log2_NWORDS + 1 included), bits
+  // 10-15 and 16-21 the same mod 61, bits 22 and 23 the big-word flags.  Then, N / 2 entries later, the weights as right shifts q - k of
+  // the two words in the same bits, and the big-word flag of word 2p at bit 22.
+  if (nttWeightTable) {
+    bool const pfa = fft.isPfa();
+    u32 const R = pfa ? fft.shape.pfaRadix() : 1, BH = H / R, L = W * BH, rem = u32(E % N);
+    auto invMod = [](u32 a, u32 m) { for (u32 x = 1; x < m; ++x) { if (u64(a) % m * x % m == 1) { return x; } } assert(false); return 0u; };
+    u32 const linv = pfa ? invMod(L, R) : 0, ninv31 = invMod(N, 31), ninv61 = invMod(N, 61);
+    auto c = [&](u32 j) { return u32((u64(j) * rem + N - 1) / N); };
+    auto shift = [&](u32 j, u32 q, u32 ninv) { return u32((c(j) % q + q - u64(j % q) * (rem % q) % q * ninv % q) % q); };
+    u32 const e = std::countr_zero(N / R) + 1;      // carryFused's log2_NWORDS + 1
+    vector<u32> table(N);
+    for (u32 g = 0; g < H; ++g) {
+      for (u32 x = 0; x < W; ++x) {
+        u32 const a = x * BH + g % BH;
+        u32 const j = 2 * (pfa ? a + L * ((g % R + R - a % R) * linv % R) : x * H + g);
+        u32 const k0 = shift(j, 31, ninv31), k1 = shift(j + 1, 31, ninv31), m0 = shift(j, 61, ninv61), m1 = shift(j + 1, 61, ninv61);
+        u32 const b0 = c(j + 1) > c(j), b1 = c(j + 2) > c(j + 1);
+        table[g * W + x] = (k0 + e) % 31 | (k1 + e) % 31 << 5 | (m0 + e) % 61 << 10 | (m1 + e) % 61 << 16 | b0 << 22 | b1 << 23;
+        table[N / 2 + g * W + x] = (31 - k0) | (31 - k1) << 5 | (61 - m0) << 10 | (61 - m1) << 16 | b0 << 22;
+      }
+    }
+    return Weights{.weightsConstIF = {}, .weightsIF = {}, .nttWeights = std::move(table)};
+  }
 
   vector<double> weightsConstIF;
   vector<double> weightsIF;
@@ -195,7 +232,7 @@ Weights genWeights(FFTConfig fft, u64 E, u32 W, u32 H, u32 nW, bool nvidiaGpu) {
     memcpy((double *) weightsConstIF.data(), weightsConstIF32.data(), weightsConstIF32.size() * sizeof(float));
   }
 
-  return Weights{.weightsConstIF=weightsConstIF, .weightsIF=weightsIF};
+  return Weights{.weightsConstIF=weightsConstIF, .weightsIF=weightsIF, .nttWeights={}};
 }
 
 string toLiteral(i32 value) { return to_string(value); }
@@ -275,7 +312,8 @@ CARRY_SIZE = 100000
 // every later Gpu, e.g. once -tune timed a PFA FFT (which turns L2_STRIPING off) every later timing would also run without L2_STRIPING.
 string clDefines(const Args& args, cl_device_id id, FFTConfig fft, u32 nW, u32 nH, const vector<KeyVal>& extraConf, u64 E, bool doLog,
                  bool &tail_single_wide, bool &tail_single_kernel, u32 &in_place, u32 &pad_size, u32 &wmul,
-                 u32 &multi_q, u32 &l2_striping, u32 (&tail_split)[4], u32 &carry_split, bool &graphs, bool &zero_q) {
+                 u32 &multi_q, u32 &l2_striping, u32 (&tail_split)[4], u32 &carry_split, bool &graphs, bool &zero_q,
+                 bool &ntt_weight_table) {
   map<string, string> config;
 
   // Highest priority is the requested "extra" conf
@@ -331,7 +369,8 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, u32 nW, u32 n
                               "MIDDLE_CHAIN61",
                               "CS_FENCE",               // Device-scope fences in carryFused's hand-offs (see carryfused.cl).  Required for Intel Arc GPUs.
                               "CS_ATOMIC",              // Experimental: carryFused's carry shuttle accessed with atomics (see carryfused.cl)
-                              "CS_RING"                 // Experimental: carryFused's carry shuttle as a ring of this many groups' slots (see carryfused.cl)
+                              "CS_RING",                // Experimental: carryFused's carry shuttle as a ring of this many groups' slots (see carryfused.cl)
+                              "NTT_WEIGHT_TABLE"        // M31+M61: carryFused reads its weight shifts from a table (see genWeights).  -tune sweeps it
                             };
   for (const auto& [k, v] : config) {
     bool const isCudaOnly = isInList(k, cudaOnlyKeys);
@@ -572,6 +611,11 @@ string clDefines(const Args& args, cl_device_id id, FFTConfig fft, u32 nW, u32 n
           carry_split, tail_split[1], tail_split[2], tail_split[3]);
     }
   }
+
+  // NTT_WEIGHT_TABLE: only the M31+M61 carryFused has the table code (see genWeights).
+  ntt_weight_table = fft.shape.fft_type == FFT3161 && configValue("NTT_WEIGHT_TABLE", nttWeightTableDefault(id, fft));
+  if (doLog && !ntt_weight_table && configValue("NTT_WEIGHT_TABLE", 0)) { log("NTT_WEIGHT_TABLE is only implemented for FFT type 1 (M31+M61).  Ignored.\n"); }
+  config.erase("NTT_WEIGHT_TABLE");
 
   // The register limits are applied per kernel (numRegisters), not as defines: as defines they would change every kernel's
   // compile options, and so its kernel cache entry, whenever one kernel's limit changed.
@@ -1095,7 +1139,8 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   queue{*shared.context, args.profile, false, args.value("SLEEP_WAIT", -1)},
       
   compiler{args, shared.context, clDefines(args, shared.context->deviceId(), fft, nW, nH, extraConf, E, logFftSize, tail_single_wide, tail_single_kernel, in_place, pad_size, wmul,
-                               multi_q, l2_striping, tail_split, carry_split, graphs, zero_q)},
+                               multi_q, l2_striping, tail_split, carry_split, graphs, zero_q,
+                               ntt_weight_table)},
 
 #define K(name, ...) name(#name, &compiler, profile.make(#name), &queue, __VA_ARGS__)
 
@@ -1108,6 +1153,8 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
 #define PFA_FP2 (PFA_FP && !tail_single_kernel)      // The two-kernel FP tail; with one kernel the stock H/2 pairs apply
 #define PFA_FP_TW (WIDTH * (fft.shape.middle / fft.shape.pfaRadix()))
 #define PFA_FP_ZERO_THREADS (SMALL_H / nH * (2 + (fft.shape.pfaRadix() - 1) / 2))
+// NTT_WEIGHT_TABLE is a define of the carryFused kernels only, so that it does not change the other kernels' cache entries
+#define nttWeightDefine (ntt_weight_table ? "-DNTT_WEIGHT_TABLE=1 " : "")
 #define PFA_FP_MAIN_THREADS (SMALL_H / nH * (tail_single_wide ? 1 : 2) * (PFA_FP_TW / 2 - 1 + (fft.shape.pfaRadix() - 1) / 2 * (PFA_FP_TW - 1)))
   K(kfftHin,               "ffthin.cl",  "fftHin",  hN / nH, kernelDefines(KFP)),
   K(ktailSquareZero,       "tailsquare.cl", "tailSquareZero", PFA_FP ? PFA_FP_ZERO_THREADS : SMALL_H / nH * 2 * PFA_ROWS, kernelDefines(KFP)),
@@ -1186,11 +1233,11 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   K(kCarryM,               "carry.cl", "carry", hN / CARRY_LEN, kernelDefines(KALL) + "-DMUL3=1"),
   K(kCarryMROE,            "carry.cl", "carry", hN / CARRY_LEN, kernelDefines(KALL) + "-DMUL3=1 -DROE=1"),
   K(kCarryLL,              "carry.cl", "carry", hN / CARRY_LEN, kernelDefines(KALL) + "-DLL=1"),
-  K(kCarryFused,           "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED)),
-  K(kCarryFusedROE,        "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + "-DROE=1"),
-  K(kCarryFusedMul,        "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + "-DMUL3=1"),
-  K(kCarryFusedMulROE,     "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + "-DMUL3=1 -DROE=1"),
-  K(kCarryFusedLL,         "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + "-DLL=1"),
+  K(kCarryFused,           "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + nttWeightDefine),
+  K(kCarryFusedROE,        "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + nttWeightDefine + "-DROE=1"),
+  K(kCarryFusedMul,        "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + nttWeightDefine + "-DMUL3=1"),
+  K(kCarryFusedMulROE,     "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + nttWeightDefine + "-DMUL3=1 -DROE=1"),
+  K(kCarryFusedLL,         "carryfused.cl", "carryFused", WIDTH * (BIG_H + wmul) / nW, kernelDefines(KALL) + numRegisters(CARRYFUSED) + nttWeightDefine + "-DLL=1"),
 
   K(carryB,                "carryb.cl", "carryB",   hN / CARRY_LEN, kernelDefines(KALL)),
 
@@ -1212,14 +1259,16 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
   K(testTime, "selftest.cl", "testTime", 4096 * 64),
 
 #undef K
+#undef nttWeightDefine
 
   bufTrigH{shared.bufCache->smallTrigCombo(&args, fft, WIDTH, fft.shape.middle, SMALL_H, nH, tail_single_wide)},
   bufTrigM{shared.bufCache->middleTrig(&args, fft, SMALL_H, BIG_H / SMALL_H, WIDTH)},
   bufTrigW{shared.bufCache->smallTrig(&args, fft, WIDTH, nW, fft.shape.middle, SMALL_H, nH, tail_single_wide)},
 
-  weights{genWeights(fft, E, WIDTH, BIG_H, nW, isNvidiaGpu(shared.context->deviceId()))},
+  weights{genWeights(fft, E, WIDTH, BIG_H, nW, isNvidiaGpu(shared.context->deviceId()), ntt_weight_table)},
   bufConstWeights{shared.context, std::move(weights.weightsConstIF)},
   bufWeights{shared.context,      std::move(weights.weightsIF)},
+  bufNttWeights{shared.context,   std::move(weights.nttWeights)},
 
 #define BUF(name, ...) name{profile.make(#name), &queue, __VA_ARGS__}
 
@@ -1336,6 +1385,9 @@ Gpu::Gpu(GpuCommon s, FFTConfig fft, u64 E, const vector<KeyVal>& extraConf, boo
     }
     for (Kernel* k : {&kCarryFusedROE, &kCarryFusedMulROE}) { k->setFixedArgs(6, bufROE); }
     for (Kernel* k : {&kCarryFused, &kCarryFusedMul, &kCarryFusedLL}) { k->setFixedArgs(6, bufStatsCarry); }
+    if (ntt_weight_table) {
+      for (Kernel* k : {&kCarryFused, &kCarryFusedROE, &kCarryFusedMul, &kCarryFusedMulROE, &kCarryFusedLL}) { k->setFixedArgs(7, bufNttWeights); }
+    }
   }
 
   carryB.setFixedArgs(1, bufCarry);

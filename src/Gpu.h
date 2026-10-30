@@ -79,9 +79,12 @@ public:
   double gumbelMiu{}, gumbelBeta{};
 };
 
+u32 nttWeightTableDefault(cl_device_id id, FFTConfig fft);   // NTT_WEIGHT_TABLE's default for this device and FFT
+
 struct Weights {
   vector<double> weightsConstIF;
   vector<double> weightsIF;
+  vector<u32> nttWeights;               // NTT_WEIGHT_TABLE (see genWeights)
 };
 
 class Gpu {
@@ -195,6 +198,7 @@ private:
   u32 l2_striping;
   u32 tail_split[4];                    // TAIL_SPLIT: number of dispatches per tail kernel, by cache group (see replay_one)
   u32 carry_split;                      // CARRY_SPLIT: number of dispatches per carryFused (see runCarryFused)
+  bool ntt_weight_table;                // NTT_WEIGHT_TABLE: carryFused reads its weight shifts from bufNttWeights (see genWeights)
   bool graphs;
   bool zero_q;          // TAIL_KERNELS 11 or 13: the tail*Zero kernels run in their own queue(s), see replay_one
 
@@ -209,6 +213,7 @@ private:
   Weights weights;
   Buffer<double> bufConstWeights;
   Buffer<double> bufWeights;
+  Buffer<u32> bufNttWeights;
 
   // "integer word" buffers. These are "small buffers": N x int.
   Buffer<Word> bufData;   // Main int buffer with the words.
