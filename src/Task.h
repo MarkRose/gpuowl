@@ -28,7 +28,7 @@ public:
   void execute(GpuCommon shared, u32 instance);
   void executeWith(GpuCommon shared, u32 instance, FFTConfig fft, const vector<KeyVal>& fftUses);   // execute's work on one FFT
 
-  void writeResultPRP(FFTConfig fft, const Args&, u32 instance, bool isPrime, u64 res64, const std::string& res2048, u32 nErrors, const fs::path& proofPath) const;
+  void writeResultPRP(FFTConfig fft, const Args&, u32 instance, bool isPrime, u64 res64, const std::string& res2048, u32 nErrors, const fs::path& proofPath, u64 shiftCount) const;
   void writeResultLL(FFTConfig fft, const Args&, u32 instance, bool isPrime, u64 res64) const;
-  void writeResultCERT(FFTConfig fft, const Args&, u32 instance, array <u64, 4> hash, u32 squarings) const;
+  void writeResultCERT(FFTConfig fft, const Args&, u32 instance, array <u64, 4> hash, u32 squarings, u64 shiftCount) const;
 };
