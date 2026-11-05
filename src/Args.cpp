@@ -299,6 +299,12 @@ named "config.txt" in the prpll run directory.
                      the same run that generated the proof. Use e.g. -autoverify 9 to skip it for the
                      low powers, or a value above the maximum power to skip it entirely.
 -iters <N>         : run next PRP test for <N> iterations and exit.
+-shift <N>|random  : PRP and CERT: compute on the residue times 2^<N> (mod 2^E-1), a "shift count" as in Prime95 and
+                     Mlucas, so that two runs of the same test put different data through the GPU. Logged residues,
+                     savefiles, proofs and results are unshifted and identical to a run without -shift; the results
+                     line gets "shift-count". <N> is the shift at iteration 0; "random" draws a new shift on every
+                     start and every reload. With a shift, the retry after a failed Gerbicz check uses a new shift.
+                     Default 0, no shift. Ignored for LL tests.
 -save <N>          : specify the number of savefiles to keep (default %u).
 -noclean           : do not delete data after the test is complete.
 -cache             : use binary kernel cache; useful with repeated use of -roeTune and -tune
@@ -595,6 +601,18 @@ void Args::parse(const string& line) {
       throw "-from no longer supported";
     }
     else if (key == "-iters") { iters = stoi(s); assert(iters > 0); }   // any positive count; release never enforced the old multiple-of-10000 rule
+    else if (key == "-shift") {
+      const char* const e = s.data() + s.size();
+      if (s == "random") {
+        shiftRandom = true;
+        shift = 0;
+      } else if (auto const r = from_chars(s.data(), e, shift); !s.empty() && r.ec == errc{} && r.ptr == e) {
+        shiftRandom = false;
+      } else {
+        log("-shift expects a shift count <N> or 'random' (found '%s')\n", s.c_str());
+        throw "-shift <N>|random";
+      }
+    }
     else if (key == "-prp" || key == "-PRP") { prpExp = stoll(s); }
     else if (key == "-ll" || key == "-LL") { llExp = stoll(s); }
     else if (key == "-smallest") { smallest = true; }
