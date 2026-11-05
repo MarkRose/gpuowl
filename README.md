@@ -41,6 +41,9 @@ runs `genbundle.sh`. Pass `/p:Bash=path\to\bash.exe` to use another bash, and
 ## Use
 See `prpll -h` for the command line options.
 
+P-1 factoring (`Pminus1=` and `Pfactor=` worktodo lines, stage 1 and stage 2 on the GPU, the hand-off to mprime) is described in
+[docs/pm1.md](docs/pm1.md).
+
 
 ## License
 
@@ -88,4 +91,5 @@ draws a new shift whenever the test starts or reloads. A shifted PRP rebuilds it
 (blockSize squarings, as a resume does), and retries a failed Gerbicz check with a new shift (doubled, or redrawn), so the
 retry does not repeat the same computation. The error check holds with the shift: the check is shifted by a = s / (2^blockSize - 1)
 mod p, and for the rare exponents where p divides 2^blockSize - 1 PRPLL keeps the check unshifted and multiplies by 3 * 2^s
-instead of 3. LL tests ignore `-shift`. The default is 0, no shift, which runs exactly as before.
+instead of 3. LL tests and P-1 (`Pminus1=`, `Pfactor=`) ignore `-shift`, and `-prpPm1` refuses it (P-1 inside a PRP test
+needs the unshifted residues). The default is 0, no shift, which runs exactly as before.
