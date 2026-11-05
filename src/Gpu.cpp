@@ -2443,13 +2443,14 @@ u64 Gpu::unshiftedDataResidue(u64 k) {
   u32 const nWin = nBefore + nAfter;
   u32 const w0 = (p0 + N - nBefore) % N;
 
-  // Logical pair kp is at pair WIDTH * y + x of the buffer, as in readResidue (etc.cl)
-  u32 const R = fft.shape.isPfa() ? fft.shape.pfaRadix() : 1, PFA_BH = SMALL_H * (fft.shape.middle / R), PFA_L = WIDTH * PFA_BH;
+  // Logical pair kp is at pair WIDTH * y + x of the buffer, as in readResidue (etc.cl); PFA as the kernels see it (fft.isPfa(): also an
+  // FP64 PFA middle of middle variant 3)
+  u32 const R = fft.isPfa() ? fft.shape.pfaRadix() : 1, PFA_BH = SMALL_H * (fft.shape.middle / R), PFA_L = WIDTH * PFA_BH;
   u32 bhInv = 1;
   while (PFA_BH % R * bhInv % R != 1 % R) { ++bhInv; }
   auto physPair = [&](u32 kp) {
     u32 x, y;
-    if (fft.shape.isPfa()) {
+    if (fft.isPfa()) {
       u32 const q = kp % PFA_L;
       x = q / PFA_BH;
       y = q % PFA_BH + PFA_BH * ((kp % R + R - q % PFA_BH % R) * bhInv % R);

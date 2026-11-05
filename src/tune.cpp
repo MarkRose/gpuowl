@@ -1809,7 +1809,7 @@ void Tune::pm1Tune(const Pm1Options& opt) {
     vector<pair<string, vector<u32>>> keys{{"INPLACE", {0, 1, 2}}, {"TAIL_KERNELS", {0, 1, 2, 3}}};
     if (multiPart) { keys.push_back({"MULTI_Q", {0, 1}}); }
     // L2_STRIPING needs INPLACE (1 or 2) and a power-of-two MIDDLE; clDefines lowers a value the width or MULTI_Q can't take
-    if (!fft.shape.isPfa()) { keys.push_back({"L2_STRIPING", {0, 1, 2}}); }
+    if (!fft.isPfa()) { keys.push_back({"L2_STRIPING", {0, 1, 2}}); }
     auto const resolved = [](const string& key, const Stage2::MulTime& m) {
       return key == "INPLACE" ? m.inPlace : key == "TAIL_KERNELS" ? m.tailKernels : key == "MULTI_Q" ? m.multiQ : m.l2Striping;
     };
