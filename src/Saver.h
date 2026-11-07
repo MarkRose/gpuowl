@@ -20,6 +20,9 @@ struct PRPState {
   vector<u32> check;
   u32 nErrors;
   double elapsed{};
+  // The -shift of the GPU data at iteration k (version 14 on; 0 is no shift).  The check in the file is unshifted all the same; none
+  // in an older savefile.
+  std::optional<u64> shift{};
 };
 
 struct LLState {
@@ -41,6 +44,7 @@ struct CERTState {
   u64 squarings;
   vector<u32> data;
   double elapsed{};
+  std::optional<u64> shift{};     // as in PRPState (version 2 on); data is unshifted
 };
 
 // P-1 stage 1 after k of the nBits iterations of x <- x^2 * 3^bit (the bits of the exponent of B1, from the top), with x in data.
